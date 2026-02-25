@@ -1,0 +1,11 @@
+serverAddr = "127.0.0.1"
+serverPort = 7000
+auth.method = "token"
+auth.token = "nonav-local-dev"
+
+[[proxies]]
+name = "home-web"
+type = "tcp"
+localIP = "home"
+localPort = 3000
+remotePort = 13000

@@ -1,0 +1,6 @@
+server/data/
+server/web-dist/
+web/node_modules/
+web/dist/
+bin/
+*.log

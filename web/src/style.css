@@ -1,0 +1,70 @@
+:root {
+  --radius-xl: 22px;
+  --radius-l: 16px;
+  --radius-m: 12px;
+  --bg-main: #f3f5f8;
+  --bg-overlay: radial-gradient(circle at 8% 8%, rgba(171, 190, 223, 0.3), transparent 24%),
+    radial-gradient(circle at 92% 3%, rgba(201, 217, 241, 0.26), transparent 30%);
+  --surface-main: rgba(255, 255, 255, 0.94);
+  --surface-solid: #ffffff;
+  --surface-tint: rgba(28, 56, 107, 0.06);
+  --surface-accent: rgba(43, 93, 208, 0.12);
+  --line-soft: rgba(29, 56, 104, 0.14);
+  --line-strong: rgba(29, 56, 104, 0.3);
+  --text-main: #132038;
+  --text-secondary: #51617a;
+  --text-tertiary: #74819a;
+  --accent-main: #2e5ecb;
+  --shadow-main: 0 16px 36px rgba(17, 38, 78, 0.08);
+
+  --panel-card: var(--surface-main);
+  --panel-chip: var(--surface-tint);
+  --panel-input: var(--surface-main);
+  --text-soft: var(--text-secondary);
+  --text-muted: var(--text-tertiary);
+}
+
+:root[data-theme='dark'] {
+  --radius-xl: 22px;
+  --radius-l: 16px;
+  --radius-m: 12px;
+  --bg-main: #101520;
+  --bg-overlay: radial-gradient(circle at 10% 10%, rgba(79, 106, 164, 0.24), transparent 28%),
+    radial-gradient(circle at 90% 5%, rgba(50, 74, 116, 0.26), transparent 32%);
+  --surface-main: rgba(20, 28, 41, 0.94);
+  --surface-solid: #141d2a;
+  --surface-tint: rgba(121, 152, 210, 0.14);
+  --surface-accent: rgba(110, 152, 245, 0.2);
+  --line-soft: rgba(131, 155, 199, 0.23);
+  --line-strong: rgba(141, 171, 224, 0.44);
+  --text-main: #d7e2f5;
+  --text-secondary: #adbcd5;
+  --text-tertiary: #8d9ab2;
+  --accent-main: #8fb1ff;
+  --shadow-main: 0 20px 44px rgba(0, 0, 0, 0.34);
+
+  --panel-card: var(--surface-main);
+  --panel-chip: var(--surface-tint);
+  --panel-input: rgba(31, 42, 60, 0.96);
+  --text-soft: var(--text-secondary);
+  --text-muted: var(--text-tertiary);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--text-main);
+  background: var(--bg-main);
+  background-image: var(--bg-overlay);
+  background-attachment: fixed;
+  font-family: 'HarmonyOS Sans SC', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
