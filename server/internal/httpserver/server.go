@@ -328,10 +328,24 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		targetURL := site.URL
+		if s.cfg.ForceFRP {
+			targetURL = strings.TrimSpace(s.cfg.FRPUpstreamURL)
+			if targetURL == "" {
+				respondError(w, http.StatusInternalServerError, "frp upstream url is empty")
+				return
+			}
+
+			if err := ensureUpstreamReachable(targetURL); err != nil {
+				respondError(w, http.StatusBadGateway, "frp upstream unavailable: "+err.Error())
+				return
+			}
+		}
+
 		created, err := s.store.CreateShare(r.Context(), core.Share{
 			SiteID:    site.ID,
 			SiteName:  site.Name,
-			TargetURL: site.URL,
+			TargetURL: targetURL,
 			Token:     shareToken,
 			Status:    "active",
 			ExpiresAt: time.Now().UTC().Add(expires),
@@ -440,7 +454,16 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyShareTarget(w http.ResponseWriter, r *http.Request, share core.Share, restPath string) {
-	targetURL, err := url.Parse(share.TargetURL)
+	targetRaw := share.TargetURL
+	if s.cfg.ForceFRP {
+		targetRaw = strings.TrimSpace(s.cfg.FRPUpstreamURL)
+		if targetRaw == "" {
+			respondError(w, http.StatusBadGateway, "frp upstream url is empty")
+			return
+		}
+	}
+
+	targetURL, err := url.Parse(targetRaw)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "target url malformed")
 		return
@@ -864,6 +887,33 @@ func shareTokenFromReferer(referer string) (string, bool) {
 	}
 
 	return token, true
+}
+
+func ensureUpstreamReachable(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid upstream url")
+	}
+
+	hostPort := parsed.Host
+	if hostPort == "" {
+		return fmt.Errorf("missing upstream host")
+	}
+
+	if !strings.Contains(hostPort, ":") {
+		if strings.EqualFold(parsed.Scheme, "https") {
+			hostPort += ":443"
+		} else {
+			hostPort += ":80"
+		}
+	}
+
+	conn, dialErr := net.DialTimeout("tcp", hostPort, 2*time.Second)
+	if dialErr != nil {
+		return fmt.Errorf("dial %s failed", hostPort)
+	}
+	_ = conn.Close()
+	return nil
 }
 
 func rewriteShareLocationHeader(resp *http.Response, shareToken string, requestHost string) {

@@ -35,10 +35,10 @@ dev-frpc:
 	@sleep 1 && ./frp/frpc -c ./frp/frpc.toml
 
 dev-api:
-	@cd server && NONAV_API_LISTEN_ADDR=:8081 NONAV_DB_PATH=./data/nonav.db NONAV_CORS_ORIGIN=http://localhost:5173 go run ./cmd/nonav-api
+	@cd server && NONAV_API_LISTEN_ADDR=:8081 NONAV_DB_PATH=./data/nonav.db NONAV_CORS_ORIGIN=http://localhost:5173 NONAV_FORCE_FRP=true NONAV_FRP_UPSTREAM_URL=http://127.0.0.1:13000 go run ./cmd/nonav-api
 
 dev-gateway:
-	@cd server && NONAV_GATEWAY_LISTEN_ADDR=:8080 NONAV_DB_PATH=./data/nonav.db NONAV_API_BASE_URL=http://127.0.0.1:8081 NONAV_FRONTEND_DEV_PROXY_URL=http://127.0.0.1:5173 NONAV_WEB_DIST_DIR=../web/dist go run ./cmd/nonav-gateway
+	@cd server && NONAV_GATEWAY_LISTEN_ADDR=:8080 NONAV_DB_PATH=./data/nonav.db NONAV_API_BASE_URL=http://127.0.0.1:8081 NONAV_FRONTEND_DEV_PROXY_URL=http://127.0.0.1:5173 NONAV_WEB_DIST_DIR=../web/dist NONAV_FORCE_FRP=true NONAV_FRP_UPSTREAM_URL=http://127.0.0.1:13000 go run ./cmd/nonav-gateway
 
 dev-frontend:
 	@cd web && npm run dev
@@ -55,17 +55,18 @@ prepare-webdist:
 
 build-api:
 	@mkdir -p bin
-	@cd server && go build -o ../bin/nonav-api ./cmd/nonav-api
+	@rm -f bin/nonav-api
+	@cd server && go build -o ../bin/nonav ./cmd/nonav-api
 
 build-gateway:
 	@mkdir -p bin
 	@cd server && go build -o ../bin/nonav-gateway ./cmd/nonav-gateway
 
 run-api:
-	@NONAV_API_LISTEN_ADDR=:8081 NONAV_DB_PATH=server/data/nonav.db ./bin/nonav-api
+	@NONAV_API_LISTEN_ADDR=:8081 NONAV_DB_PATH=server/data/nonav.db NONAV_FORCE_FRP=true NONAV_FRP_UPSTREAM_URL=http://127.0.0.1:13000 ./bin/nonav
 
 run-gateway:
-	@NONAV_GATEWAY_LISTEN_ADDR=:8080 NONAV_DB_PATH=server/data/nonav.db NONAV_API_BASE_URL=http://127.0.0.1:8081 NONAV_WEB_DIST_DIR=server/web-dist ./bin/nonav-gateway
+	@NONAV_GATEWAY_LISTEN_ADDR=:8080 NONAV_DB_PATH=server/data/nonav.db NONAV_API_BASE_URL=http://127.0.0.1:8081 NONAV_WEB_DIST_DIR=server/web-dist NONAV_FORCE_FRP=true NONAV_FRP_UPSTREAM_URL=http://127.0.0.1:13000 ./bin/nonav-gateway
 
 run-all:
 	@pids=""; \

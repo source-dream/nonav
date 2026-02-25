@@ -46,6 +46,8 @@ make dev
 - FRP Server: `127.0.0.1:7000`
 - FRP 映射（home:3000）: `127.0.0.1:13000`
 
+开发模式默认开启 `FRP-only` 验证：新建分享会固定使用 `http://127.0.0.1:13000` 作为上游目标。
+
 开发模式下可直接访问 `http://localhost:8080`，Gateway 会把前端请求代理到 Vite。
 
 若出现 `connect: connection refused 127.0.0.1:5173`，说明 Vite 未成功启动（或 5173 端口被占用），请先释放端口后重试 `make dev`。
@@ -63,7 +65,7 @@ make run-all
 
 - 构建前端到 `web/dist`
 - 拷贝静态文件到 `server/web-dist`
-- 构建 API 二进制到 `bin/nonav-api`
+- 构建 API 二进制到 `bin/nonav`
 - 构建 Gateway 二进制到 `bin/nonav-gateway`
 
 此时运行两个二进制即可同时提供：
@@ -103,6 +105,8 @@ go run ./cmd/nonav-gateway
 - `NONAV_PUBLIC_BASE_URL`：默认 `http://localhost:8080`
 - `NONAV_CORS_ORIGIN`：默认 `http://localhost:8080`
 - `NONAV_DEFAULT_SHARE_TTL_HOURS`：默认 `24`
+- `NONAV_FORCE_FRP`：是否强制分享仅走 FRP 上游（默认 `false`）
+- `NONAV_FRP_UPSTREAM_URL`：FRP 上游地址（默认 `http://127.0.0.1:13000`）
 
 ### 3) 启动前端
 

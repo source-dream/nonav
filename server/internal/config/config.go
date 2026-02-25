@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,8 @@ type Config struct {
 	PublicBaseURL       string
 	AllowedCORSOrigin   string
 	DefaultShareTTL     time.Duration
+	ForceFRP            bool
+	FRPUpstreamURL      string
 }
 
 func Load() Config {
@@ -31,6 +34,8 @@ func Load() Config {
 		PublicBaseURL:       getEnv("NONAV_PUBLIC_BASE_URL", "http://localhost:8080"),
 		AllowedCORSOrigin:   getEnv("NONAV_CORS_ORIGIN", "http://localhost:8080"),
 		DefaultShareTTL:     time.Duration(defaultTTL) * time.Hour,
+		ForceFRP:            getEnvBool("NONAV_FORCE_FRP", false),
+		FRPUpstreamURL:      getEnv("NONAV_FRP_UPSTREAM_URL", "http://127.0.0.1:13000"),
 	}
 }
 
@@ -54,4 +59,21 @@ func getEnvInt(key string, fallback int) int {
 	}
 
 	return parsed
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+
+	if value == "1" || value == "true" || value == "yes" || value == "on" {
+		return true
+	}
+
+	if value == "0" || value == "false" || value == "no" || value == "off" {
+		return false
+	}
+
+	return fallback
 }
