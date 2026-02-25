@@ -13,10 +13,13 @@ import (
 )
 
 type App struct {
-	name    string
-	store   *store.SQLiteStore
-	server  *http.Server
-	cleanup bool
+	name        string
+	store       *store.SQLiteStore
+	server      *http.Server
+	cleanup     bool
+	cleanupTask func(context.Context) error
+	startTask   func() error
+	stopTask    func() error
 }
 
 func NewAPI(cfg config.Config) (*App, error) {
@@ -41,25 +44,22 @@ func NewAPI(cfg config.Config) (*App, error) {
 			WriteTimeout: 60 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		},
-		cleanup: true,
+		cleanup:     true,
+		cleanupTask: handler.CleanupExpiredShares,
+		startTask:   handler.StartBackgroundServices,
+		stopTask:    handler.StopBackgroundServices,
 	}, nil
 }
 
 func NewGateway(cfg config.Config) (*App, error) {
-	st, err := store.NewSQLiteStore(cfg.DBPath)
+	handler, err := httpserver.NewGateway(cfg)
 	if err != nil {
-		return nil, err
-	}
-
-	handler, err := httpserver.NewGateway(cfg, st)
-	if err != nil {
-		_ = st.Close()
 		return nil, err
 	}
 
 	return &App{
 		name:  "gateway",
-		store: st,
+		store: nil,
 		server: &http.Server{
 			Addr:         cfg.GatewayListenAddr,
 			Handler:      handler,
@@ -67,11 +67,28 @@ func NewGateway(cfg config.Config) (*App, error) {
 			WriteTimeout: 60 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		},
+		startTask: handler.StartBackgroundServices,
+		stopTask:  handler.StopBackgroundServices,
 	}, nil
 }
 
 func (a *App) Run() error {
-	defer a.store.Close()
+	if a.store != nil {
+		defer a.store.Close()
+	}
+	if a.stopTask != nil {
+		defer func() {
+			if err := a.stopTask(); err != nil {
+				log.Printf("background stop failed: %v", err)
+			}
+		}()
+	}
+
+	if a.startTask != nil {
+		if err := a.startTask(); err != nil {
+			return fmt.Errorf("background start failed: %w", err)
+		}
+	}
 
 	if a.cleanup {
 		go a.startCleanupTicker()
@@ -90,7 +107,12 @@ func (a *App) startCleanupTicker() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := a.store.PurgeExpiredShares(context.Background()); err != nil {
+		task := a.cleanupTask
+		if task == nil {
+			task = a.store.PurgeExpiredShares
+		}
+
+		if err := task(context.Background()); err != nil {
 			log.Printf("cleanup expired shares failed: %v", err)
 		}
 	}

@@ -13,8 +13,8 @@ Go + Vue + SQLite 的内网导航与分享网关项目。
 ## 架构
 
 - `web`：Vue 3 前端（导航页）
-- `server/cmd/nonav-api`：Go 控制面 API（二进制 1）
-- `server/cmd/nonav-gateway`：Go 分享网关 + 静态站点托管（二进制 2）
+- `server/cmd/nonav-api`：Go 导航服务（内网导航前后端 + 控制面 API）（二进制 1）
+- `server/cmd/nonav-gateway`：Go 分享网关（仅提供 `/s/*` 分享访问）（二进制 2）
 - `nginx`（可选）：外层 TLS 与反向代理
 
 请求链路：
@@ -24,7 +24,7 @@ Go + Vue + SQLite 的内网导航与分享网关项目。
 3. 网关将 `/api/*` 转发到 `nonav-api`
 4. 网关对 `/s/*` 校验分享状态和密码会话并反代到目标站点
 
-> 下一阶段可接入 frpc/frps，把目标 URL 替换为动态隧道地址。
+> 当前版本已支持 FRP-only 模式，可在分享创建时动态分配 FRP 上游端口。
 
 ## 本地启动（推荐 Make）
 
@@ -43,10 +43,12 @@ make dev
 - 前端 Vite: `http://localhost:5173`
 - API: `http://localhost:8081`
 - Gateway: `http://localhost:8080`
-- FRP Server: `127.0.0.1:7000`
-- FRP 映射（home:3000）: `127.0.0.1:13000`
 
-开发模式默认开启 `FRP-only` 验证：新建分享会固定使用 `http://127.0.0.1:13000` 作为上游目标。
+`make dev` 由 gateway 内嵌启动 `frps`，分享创建时由 API 动态拉起 `frpc tcp` 代理进程。
+
+开发模式默认开启 `FRP-only` 验证：新建分享会在 `NONAV_FRP_PORT_MIN` 到 `NONAV_FRP_PORT_MAX` 的端口池中动态分配上游目标。
+
+可通过 `NONAV_FRP_PORT_MIN` / `NONAV_FRP_PORT_MAX` 配置端口池范围，后续用于多站点动态分配。
 
 开发模式下可直接访问 `http://localhost:8080`，Gateway 会把前端请求代理到 Vite。
 
@@ -64,13 +66,13 @@ make run-all
 执行后会：
 
 - 构建前端到 `web/dist`
-- 拷贝静态文件到 `server/web-dist`
+- 拷贝静态文件到 `server/internal/httpserver/web-dist` 并编译进 `nonav-gateway`
 - 构建 API 二进制到 `bin/nonav`
 - 构建 Gateway 二进制到 `bin/nonav-gateway`
 
 此时运行两个二进制即可同时提供：
 
-- 前端页面 `/`（gateway 托管）
+- 网关仅处理 `/s/*` 与分享上下文请求，访问 `/` 返回 404
 - API `/api/*`（gateway 反代到 api）
 - 分享网关 `/s/*`（gateway 直接处理）
 
@@ -86,6 +88,8 @@ go run ./cmd/nonav-api
 
 默认监听 `:8081`。
 
+首次在空目录运行时会自动生成 `internal.env` 模板文件（仅在文件不存在时生成），生成后程序会提示并退出，等待你修改配置后再次启动。
+
 ### 2) 启动 Gateway
 
 ```bash
@@ -95,18 +99,30 @@ go run ./cmd/nonav-gateway
 
 默认监听 `:8080`。
 
+首次在空目录运行时会自动生成 `gateway.env` 模板文件（仅在文件不存在时生成），生成后程序会提示并退出，等待你修改配置后再次启动。
+
 可选环境变量：
 
 - `NONAV_API_LISTEN_ADDR`：默认 `:8081`
 - `NONAV_GATEWAY_LISTEN_ADDR`：默认 `:8080`
-- `NONAV_API_BASE_URL`：默认 `http://127.0.0.1:8081`
+- `NONAV_API_BASE_URL`：默认 `http://127.0.0.1:8081`（分离部署建议 `http://127.0.0.1:18081`）
 - `NONAV_DB_PATH`：默认 `./data/nonav.db`
-- `NONAV_WEB_DIST_DIR`：默认 `./web-dist`
+- `NONAV_WEB_DIST_DIR`：默认 `./web-dist`（仅作文件系统回退，可不设置）
 - `NONAV_PUBLIC_BASE_URL`：默认 `http://localhost:8080`
 - `NONAV_CORS_ORIGIN`：默认 `http://localhost:8080`
 - `NONAV_DEFAULT_SHARE_TTL_HOURS`：默认 `24`
 - `NONAV_FORCE_FRP`：是否强制分享仅走 FRP 上游（默认 `false`）
 - `NONAV_FRP_UPSTREAM_URL`：FRP 上游地址（默认 `http://127.0.0.1:13000`）
+- `NONAV_FRP_PORT_MIN`：FRP 端口池最小值（默认 `13000`）
+- `NONAV_FRP_PORT_MAX`：FRP 端口池最大值（默认 `13020`）
+- `NONAV_FRP_CLIENT_BIN`：frpc 可执行文件路径（默认 `../frp/frpc`）
+- `NONAV_FRP_SERVER_BIN`：frps 可执行文件路径（仅 `NONAV_EMBED_FRPS=true` 时使用）
+- `NONAV_EMBED_FRPS`：gateway 是否内嵌启动 frps（默认 `false`，推荐生产设为 `true`）
+- `NONAV_FRP_SERVER_BIND_ADDR`：frps 监听地址（仅 `NONAV_EMBED_FRPS=true` 时使用）
+- `NONAV_FRP_SERVER_ADDR`：frps 地址（默认 `127.0.0.1`）
+- `NONAV_FRP_SERVER_PORT`：frps 端口（默认 `7000`）
+- `NONAV_FRP_AUTH_TOKEN`：frp token（默认 `nonav-local-dev`）
+- `NONAV_FRP_RECOVER_ON_START`：API 启动时是否自动恢复历史分享代理（默认 `false`）
 
 ### 3) 启动前端
 
@@ -117,6 +133,62 @@ npm run dev
 ```
 
 默认地址：`http://localhost:5173`
+
+## 生产部署（内网 + 公网）
+
+推荐拓扑：
+
+- 内网服务器：`nonav`（API） + 业务站点
+- 公网服务器：`nonav-gateway`（嵌入 frps）
+- 网关前面可选 Nginx 做 TLS
+
+### 1) 打包
+
+```bash
+make build
+```
+
+产物：
+
+- `bin/nonav`（部署到内网机）
+- `bin/nonav-gateway`（部署到公网机）
+- `server/web-dist`（部署到公网机，给 gateway 托管前端）
+
+### 2) 准备文件
+
+- 把 `bin/nonav`、`frp/frpc` 传到内网机 `/opt/nonav`
+- 把 `bin/nonav-gateway`、`frp/frps` 传到公网机 `/opt/nonav`
+- 复制环境变量模板：
+  - 内网机：`deploy/env/internal.env.example` -> `/etc/nonav/internal.env`
+  - 公网机：`deploy/env/gateway.env.example` -> `/etc/nonav/gateway.env`
+
+### 3) systemd 启动
+
+- 内网机：`deploy/systemd/nonav-api.service`
+- 公网机：`deploy/systemd/nonav-gateway.service`
+
+```bash
+sudo cp deploy/systemd/nonav-api.service /etc/systemd/system/
+sudo cp deploy/systemd/nonav-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nonav-api
+sudo systemctl enable --now nonav-gateway
+```
+
+### 4) 关键检查
+
+- 公网机 `7000/tcp`（frps）需要放行
+- 公网机 `8080` 仅给 Nginx 回源（推荐）
+- 内网机到公网机 `7000` 必须可达
+- 公网机 gateway 到 `127.0.0.1:18081`（API frp隧道）应可达
+- `NONAV_FRP_AUTH_TOKEN` 内外网保持一致
+
+### 5) 验证
+
+- 内网机：`systemctl status nonav-api`
+- 公网机：`systemctl status nonav-gateway`
+- 分享创建后：公网机应出现对应 `13xxx` 监听（frp 代理端口）
+- 停止分享后：对应监听端口应消失
 
 ## Nginx 反向代理示例
 
@@ -144,6 +216,6 @@ server {
 
 ## 后续计划
 
-1. 接入 frpc/frps 进程编排（创建分享时自动建隧道）
+1. 提升 FRP 动态编排稳定性（自动恢复、故障回滚、监控）
 2. 新增流量统计聚合图表
 3. Natter 打洞分享作为实验功能

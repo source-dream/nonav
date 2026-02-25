@@ -1,0 +1,18 @@
+[Unit]
+Description=Nonav Gateway service (public)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nonav
+Group=nonav
+WorkingDirectory=/opt/nonav
+EnvironmentFile=/etc/nonav/gateway.env
+ExecStart=/opt/nonav/bin/nonav-gateway
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

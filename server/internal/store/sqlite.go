@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"nonav/server/internal/core"
@@ -31,17 +32,48 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	}
 
 	store := &SQLiteStore{db: db}
-	if err := store.setupPragmas(); err != nil {
+	if err := retryOnSQLiteLock(func() error {
+		return store.setupPragmas()
+	}); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	if err := store.migrate(); err != nil {
+	if err := retryOnSQLiteLock(func() error {
+		return store.migrate()
+	}); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
 	return store, nil
+}
+
+func retryOnSQLiteLock(fn func() error) error {
+	const maxAttempts = 20
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		if !isSQLiteLockedError(err) || attempt == maxAttempts {
+			return err
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return nil
+}
+
+func isSQLiteLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
 }
 
 func (s *SQLiteStore) Close() error {
@@ -64,6 +96,7 @@ func (s *SQLiteStore) migrate() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			site_id INTEGER NOT NULL,
 			target_url TEXT NOT NULL,
+			frp_remote_port INTEGER NOT NULL DEFAULT 0,
 			token TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
 			status TEXT NOT NULL,
@@ -97,6 +130,42 @@ func (s *SQLiteStore) migrate() error {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
+	}
+
+	if err := s.ensureShareColumn("frp_remote_port", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) ensureShareColumn(name string, columnDef string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(shares);`)
+	if err != nil {
+		return fmt.Errorf("query shares table info: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid      int
+			colName  string
+			colType  string
+			notNull  int
+			defaultV sql.NullString
+			primaryK int
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultV, &primaryK); err != nil {
+			return fmt.Errorf("scan shares table info: %w", err)
+		}
+
+		if colName == name {
+			return nil
+		}
+	}
+
+	if _, err := s.db.Exec(`ALTER TABLE shares ADD COLUMN ` + name + ` ` + columnDef); err != nil {
+		return fmt.Errorf("alter shares add %s: %w", name, err)
 	}
 
 	return nil
@@ -271,9 +340,9 @@ func (s *SQLiteStore) GetSiteByID(ctx context.Context, siteID int64) (core.Site,
 func (s *SQLiteStore) CreateShare(ctx context.Context, share core.Share, passwordHash string) (core.Share, error) {
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO shares(site_id, target_url, token, password_hash, status, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, share.SiteID, share.TargetURL, share.Token, passwordHash, share.Status, share.ExpiresAt, now, now)
+		INSERT INTO shares(site_id, target_url, frp_remote_port, token, password_hash, status, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, share.SiteID, share.TargetURL, share.FRPPort, share.Token, passwordHash, share.Status, share.ExpiresAt, now, now)
 	if err != nil {
 		return core.Share{}, fmt.Errorf("create share: %w", err)
 	}
@@ -297,6 +366,7 @@ func (s *SQLiteStore) ListShares(ctx context.Context) ([]core.Share, error) {
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.frp_remote_port,
 			sh.token,
 			sh.status,
 			sh.expires_at,
@@ -321,6 +391,7 @@ func (s *SQLiteStore) ListShares(ctx context.Context) ([]core.Share, error) {
 			&share.SiteID,
 			&share.SiteName,
 			&share.TargetURL,
+			&share.FRPPort,
 			&share.Token,
 			&share.Status,
 			&share.ExpiresAt,
@@ -347,6 +418,7 @@ func (s *SQLiteStore) GetShareByToken(ctx context.Context, token string) (core.S
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.frp_remote_port,
 			sh.token,
 			sh.status,
 			sh.expires_at,
@@ -363,6 +435,7 @@ func (s *SQLiteStore) GetShareByToken(ctx context.Context, token string) (core.S
 		&share.SiteID,
 		&share.SiteName,
 		&share.TargetURL,
+		&share.FRPPort,
 		&share.Token,
 		&share.Status,
 		&share.ExpiresAt,
@@ -380,6 +453,103 @@ func (s *SQLiteStore) GetShareByToken(ctx context.Context, token string) (core.S
 	}
 
 	return share, passwordHash, nil
+}
+
+func (s *SQLiteStore) GetShareByID(ctx context.Context, shareID int64) (core.Share, string, error) {
+	var share core.Share
+	var passwordHash string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			sh.id,
+			sh.site_id,
+			si.name,
+			sh.target_url,
+			sh.frp_remote_port,
+			sh.token,
+			sh.status,
+			sh.expires_at,
+			sh.stopped_at,
+			sh.created_at,
+			sh.updated_at,
+			(SELECT COUNT(1) FROM share_access_logs sal WHERE sal.share_id = sh.id) AS access_hits,
+			sh.password_hash
+		FROM shares sh
+		INNER JOIN sites si ON si.id = sh.site_id
+		WHERE sh.id = ?
+	`, shareID).Scan(
+		&share.ID,
+		&share.SiteID,
+		&share.SiteName,
+		&share.TargetURL,
+		&share.FRPPort,
+		&share.Token,
+		&share.Status,
+		&share.ExpiresAt,
+		&share.StoppedAt,
+		&share.CreatedAt,
+		&share.UpdatedAt,
+		&share.AccessHits,
+		&passwordHash,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.Share{}, "", ErrNotFound
+		}
+		return core.Share{}, "", fmt.Errorf("get share by id: %w", err)
+	}
+
+	return share, passwordHash, nil
+}
+
+func (s *SQLiteStore) ListSharesBySite(ctx context.Context, siteID int64) ([]core.Share, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			sh.id,
+			sh.site_id,
+			si.name,
+			sh.target_url,
+			sh.frp_remote_port,
+			sh.token,
+			sh.status,
+			sh.expires_at,
+			sh.stopped_at,
+			sh.created_at,
+			sh.updated_at,
+			(SELECT COUNT(1) FROM share_access_logs sal WHERE sal.share_id = sh.id) AS access_hits
+		FROM shares sh
+		INNER JOIN sites si ON si.id = sh.site_id
+		WHERE sh.site_id = ?
+		ORDER BY sh.created_at DESC
+	`, siteID)
+	if err != nil {
+		return nil, fmt.Errorf("list shares by site: %w", err)
+	}
+	defer rows.Close()
+
+	shares := make([]core.Share, 0)
+	for rows.Next() {
+		var share core.Share
+		if err := rows.Scan(
+			&share.ID,
+			&share.SiteID,
+			&share.SiteName,
+			&share.TargetURL,
+			&share.FRPPort,
+			&share.Token,
+			&share.Status,
+			&share.ExpiresAt,
+			&share.StoppedAt,
+			&share.CreatedAt,
+			&share.UpdatedAt,
+			&share.AccessHits,
+		); err != nil {
+			return nil, fmt.Errorf("scan share by site: %w", err)
+		}
+
+		shares = append(shares, share)
+	}
+
+	return shares, nil
 }
 
 func (s *SQLiteStore) StopShare(ctx context.Context, shareID int64) error {
@@ -447,6 +617,52 @@ func (s *SQLiteStore) DeleteSharesBySite(ctx context.Context, siteID int64) erro
 	}
 
 	return nil
+}
+
+func (s *SQLiteStore) GetUsedFRPPorts(ctx context.Context) (map[int]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT frp_remote_port
+		FROM shares
+		WHERE status = 'active' AND frp_remote_port > 0
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list used frp ports: %w", err)
+	}
+	defer rows.Close()
+
+	ports := make(map[int]struct{})
+	for rows.Next() {
+		var port int
+		if err := rows.Scan(&port); err != nil {
+			return nil, fmt.Errorf("scan used frp port: %w", err)
+		}
+		ports[port] = struct{}{}
+	}
+
+	return ports, nil
+}
+
+func (s *SQLiteStore) ListExpiredActiveShareSiteIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT site_id
+		FROM shares
+		WHERE status = 'active' AND expires_at < ? AND frp_remote_port > 0
+	`, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("list expired active share site ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var siteID int64
+		if err := rows.Scan(&siteID); err != nil {
+			return nil, fmt.Errorf("scan expired active share site id: %w", err)
+		}
+		ids = append(ids, siteID)
+	}
+
+	return ids, nil
 }
 
 func (s *SQLiteStore) LogShareAccess(ctx context.Context, shareID int64, method string, path string, remoteIP string, statusCode int) error {

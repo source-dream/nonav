@@ -18,6 +18,7 @@ type Share struct {
 	SiteID     int64      `json:"siteId"`
 	SiteName   string     `json:"siteName"`
 	TargetURL  string     `json:"targetUrl"`
+	FRPPort    int        `json:"frpPort"`
 	Token      string     `json:"token"`
 	Status     string     `json:"status"`
 	ExpiresAt  time.Time  `json:"expiresAt"`

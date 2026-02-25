@@ -19,6 +19,18 @@ type Config struct {
 	DefaultShareTTL     time.Duration
 	ForceFRP            bool
 	FRPUpstreamURL      string
+	FRPPortMin          int
+	FRPPortMax          int
+	FRPClientBin        string
+	FRPServerBin        string
+	EmbedFRPServer      bool
+	FRPServerBindAddr   string
+	FRPServerAddr       string
+	FRPServerPort       int
+	FRPAuthToken        string
+	FRPRecoverOnStart   bool
+	FRPExposeAPI        bool
+	FRPAPIRemotePort    int
 }
 
 func Load() Config {
@@ -36,6 +48,18 @@ func Load() Config {
 		DefaultShareTTL:     time.Duration(defaultTTL) * time.Hour,
 		ForceFRP:            getEnvBool("NONAV_FORCE_FRP", false),
 		FRPUpstreamURL:      getEnv("NONAV_FRP_UPSTREAM_URL", "http://127.0.0.1:13000"),
+		FRPPortMin:          getEnvInt("NONAV_FRP_PORT_MIN", 13000),
+		FRPPortMax:          getEnvInt("NONAV_FRP_PORT_MAX", 13000),
+		FRPClientBin:        getEnv("NONAV_FRP_CLIENT_BIN", "frpc"),
+		FRPServerBin:        getEnv("NONAV_FRP_SERVER_BIN", "frps"),
+		EmbedFRPServer:      getEnvBool("NONAV_EMBED_FRPS", false),
+		FRPServerBindAddr:   getEnv("NONAV_FRP_SERVER_BIND_ADDR", "0.0.0.0"),
+		FRPServerAddr:       getEnv("NONAV_FRP_SERVER_ADDR", "127.0.0.1"),
+		FRPServerPort:       getEnvInt("NONAV_FRP_SERVER_PORT", 7000),
+		FRPAuthToken:        getEnv("NONAV_FRP_AUTH_TOKEN", "nonav-local-dev"),
+		FRPRecoverOnStart:   getEnvBool("NONAV_FRP_RECOVER_ON_START", false),
+		FRPExposeAPI:        getEnvBool("NONAV_FRP_EXPOSE_API", true),
+		FRPAPIRemotePort:    getEnvInt("NONAV_FRP_API_REMOTE_PORT", 18081),
 	}
 }
 
