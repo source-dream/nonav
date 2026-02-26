@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,12 +36,15 @@ type ShareInternalRecord struct {
 func (c *InternalAPIClient) GetShareByToken(ctx context.Context, token string) (ShareInternalRecord, error) {
 	endpoint := c.baseURL + "/api/internal/shares/token/" + url.PathEscape(token)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	startedAt := time.Now()
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		log.Printf("internal_api event=get_share_by_token token=%s status=error latency_ms=%d error=%v", token, time.Since(startedAt).Milliseconds(), err)
 		return ShareInternalRecord{}, fmt.Errorf("internal api get share: %w", err)
 	}
 	defer resp.Body.Close()
+	log.Printf("internal_api event=get_share_by_token token=%s status=%d latency_ms=%d", token, resp.StatusCode, time.Since(startedAt).Milliseconds())
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ShareInternalRecord{}, errNotFound
@@ -53,6 +57,35 @@ func (c *InternalAPIClient) GetShareByToken(ctx context.Context, token string) (
 	var payload ShareInternalRecord
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return ShareInternalRecord{}, fmt.Errorf("decode internal share payload: %w", err)
+	}
+
+	return payload, nil
+}
+
+func (c *InternalAPIClient) GetShareBySubdomain(ctx context.Context, slug string) (ShareInternalRecord, error) {
+	endpoint := c.baseURL + "/api/internal/shares/subdomain/" + url.PathEscape(slug)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	startedAt := time.Now()
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		log.Printf("internal_api event=get_share_by_subdomain slug=%s status=error latency_ms=%d error=%v", slug, time.Since(startedAt).Milliseconds(), err)
+		return ShareInternalRecord{}, fmt.Errorf("internal api get share by subdomain: %w", err)
+	}
+	defer resp.Body.Close()
+	log.Printf("internal_api event=get_share_by_subdomain slug=%s status=%d latency_ms=%d", slug, resp.StatusCode, time.Since(startedAt).Milliseconds())
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ShareInternalRecord{}, errNotFound
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ShareInternalRecord{}, fmt.Errorf("internal api get share by subdomain status %d", resp.StatusCode)
+	}
+
+	var payload ShareInternalRecord
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ShareInternalRecord{}, fmt.Errorf("decode internal share by subdomain payload: %w", err)
 	}
 
 	return payload, nil
@@ -98,12 +131,15 @@ func (c *InternalAPIClient) ValidateShareSession(ctx context.Context, token stri
 	endpoint := c.baseURL + "/api/internal/shares/token/" + url.PathEscape(token) + "/session"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	startedAt := time.Now()
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		log.Printf("internal_api event=validate_session token=%s status=error latency_ms=%d error=%v", token, time.Since(startedAt).Milliseconds(), err)
 		return false, fmt.Errorf("internal api validate session: %w", err)
 	}
 	defer resp.Body.Close()
+	log.Printf("internal_api event=validate_session token=%s status=%d latency_ms=%d", token, resp.StatusCode, time.Since(startedAt).Milliseconds())
 
 	if resp.StatusCode == http.StatusNotFound {
 		return false, errNotFound

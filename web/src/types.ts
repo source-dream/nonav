@@ -13,6 +13,8 @@ export interface Share {
   id: number
   siteId: number
   siteName: string
+  shareMode: 'path_ctx' | 'subdomain'
+  subdomainSlug?: string
   token: string
   status: 'active' | 'stopped' | 'expired'
   expiresAt: string
@@ -28,6 +30,8 @@ export interface ShareCreatedResult {
     id: number
     siteId: number
     siteName: string
+    shareMode: 'path_ctx' | 'subdomain'
+    subdomainSlug?: string
     token: string
     status: 'active' | 'stopped' | 'expired'
     expiresAt: string
@@ -43,11 +47,12 @@ export interface SiteUpdatePayload {
   name: string
   url: string
   groupName: string
-  icon: string
 }
 
 export interface CreateSharePayload {
   siteId: number
   expiresInHours?: number
   password?: string
+  shareMode?: 'path_ctx' | 'subdomain'
+  subdomainSlug?: string
 }

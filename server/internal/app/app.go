@@ -57,6 +57,8 @@ func NewGateway(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	log.Printf("gateway config: public_base_url=%s api_base_url=%s subdomain_enabled=%t subdomain_base=%s log_level=%s route_trace=%t", cfg.PublicBaseURL, cfg.APIBaseURL, cfg.ShareSubdomainOn, cfg.ShareSubdomainBase, cfg.LogLevel, cfg.LogRouteTrace)
+
 	return &App{
 		name:  "gateway",
 		store: nil,

@@ -15,6 +15,8 @@ type Config struct {
 	DBPath              string
 	WebDistDir          string
 	PublicBaseURL       string
+	ShareSubdomainBase  string
+	ShareSubdomainOn    bool
 	AllowedCORSOrigin   string
 	DefaultShareTTL     time.Duration
 	ForceFRP            bool
@@ -31,6 +33,8 @@ type Config struct {
 	FRPRecoverOnStart   bool
 	FRPExposeAPI        bool
 	FRPAPIRemotePort    int
+	LogLevel            string
+	LogRouteTrace       bool
 }
 
 func Load() Config {
@@ -44,6 +48,8 @@ func Load() Config {
 		DBPath:              getEnv("NONAV_DB_PATH", "./data/nonav.db"),
 		WebDistDir:          getEnv("NONAV_WEB_DIST_DIR", "./web-dist"),
 		PublicBaseURL:       getEnv("NONAV_PUBLIC_BASE_URL", "http://localhost:8080"),
+		ShareSubdomainBase:  getEnv("NONAV_SHARE_SUBDOMAIN_BASE", ""),
+		ShareSubdomainOn:    getEnvBool("NONAV_SHARE_SUBDOMAIN_ENABLED", false),
 		AllowedCORSOrigin:   getEnv("NONAV_CORS_ORIGIN", "http://localhost:8080"),
 		DefaultShareTTL:     time.Duration(defaultTTL) * time.Hour,
 		ForceFRP:            getEnvBool("NONAV_FORCE_FRP", false),
@@ -57,9 +63,11 @@ func Load() Config {
 		FRPServerAddr:       getEnv("NONAV_FRP_SERVER_ADDR", "127.0.0.1"),
 		FRPServerPort:       getEnvInt("NONAV_FRP_SERVER_PORT", 7000),
 		FRPAuthToken:        getEnv("NONAV_FRP_AUTH_TOKEN", "nonav-local-dev"),
-		FRPRecoverOnStart:   getEnvBool("NONAV_FRP_RECOVER_ON_START", false),
+		FRPRecoverOnStart:   getEnvBool("NONAV_FRP_RECOVER_ON_START", true),
 		FRPExposeAPI:        getEnvBool("NONAV_FRP_EXPOSE_API", true),
 		FRPAPIRemotePort:    getEnvInt("NONAV_FRP_API_REMOTE_PORT", 18081),
+		LogLevel:            strings.ToLower(strings.TrimSpace(getEnv("NONAV_LOG_LEVEL", "info"))),
+		LogRouteTrace:       getEnvBool("NONAV_LOG_ROUTE_TRACE", true),
 	}
 }
 

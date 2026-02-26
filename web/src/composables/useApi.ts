@@ -33,7 +33,7 @@ export function useApi() {
     return payload.sites
   }
 
-  const createSite = async (input: { name: string; url: string; groupName: string; icon: string }) => {
+  const createSite = async (input: { name: string; url: string; groupName: string }) => {
     return request<Site>('/api/sites', {
       method: 'POST',
       body: JSON.stringify(input),
@@ -53,7 +53,7 @@ export function useApi() {
         name: input.name,
         url: input.url,
         groupName: input.groupName,
-        icon: input.icon,
+        icon: '',
       }),
     })
   }
@@ -76,6 +76,8 @@ export function useApi() {
         siteId: input.siteId,
         expiresInHours: input.expiresInHours,
         password: input.password,
+        shareMode: input.shareMode,
+        subdomainSlug: input.subdomainSlug,
       }),
     })
   }

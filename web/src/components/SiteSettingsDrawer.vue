@@ -12,8 +12,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  saveSite: [payload: { id: number; name: string; url: string; groupName: string; icon: string }]
-  startShare: [payload: { siteId: number; expiresInHours?: number; password?: string }]
+  saveSite: [payload: { id: number; name: string; url: string; groupName: string }]
+  startShare: [payload: { siteId: number; expiresInHours?: number; password?: string; shareMode?: 'path_ctx' | 'subdomain'; subdomainSlug?: string }]
   stopShare: [share: Share]
   copyShare: [share: Share]
   deleteSite: [site: Site]
@@ -23,12 +23,13 @@ const siteForm = reactive({
   name: '',
   url: '',
   groupName: '',
-  icon: '',
 })
 
 const shareForm = reactive({
   expiresInHours: '',
   password: '',
+  shareMode: 'path_ctx' as 'path_ctx' | 'subdomain',
+  subdomainSlug: '',
 })
 
 const deleteConfirmText = reactive({ value: '' })
@@ -39,9 +40,10 @@ watch(
     siteForm.name = site?.name ?? ''
     siteForm.url = site?.url ?? ''
     siteForm.groupName = site?.groupName ?? ''
-    siteForm.icon = site?.icon ?? ''
     shareForm.expiresInHours = ''
     shareForm.password = ''
+    shareForm.shareMode = 'path_ctx'
+    shareForm.subdomainSlug = ''
     deleteConfirmText.value = ''
   },
   { immediate: true },
@@ -64,7 +66,6 @@ const submitSite = () => {
     name: siteForm.name.trim(),
     url: siteForm.url.trim(),
     groupName: siteForm.groupName.trim(),
-    icon: siteForm.icon.trim(),
   })
 }
 
@@ -82,6 +83,8 @@ const submitStartShare = () => {
     siteId: props.site.id,
     expiresInHours,
     password,
+    shareMode: shareForm.shareMode,
+    subdomainSlug: shareForm.shareMode === 'subdomain' ? shareForm.subdomainSlug.trim() || undefined : undefined,
   })
 }
 
@@ -115,10 +118,6 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString()
               <span>URL</span>
               <input v-model="siteForm.url" type="url" placeholder="https://intranet.example.local" />
             </label>
-            <label class="field field-full">
-              <span>图标</span>
-              <input v-model="siteForm.icon" type="text" placeholder="例如：🚀" />
-            </label>
           </div>
           <div class="actions-row">
             <button class="button-primary" type="button" :disabled="saving" @click="submitSite">保存网站配置</button>
@@ -136,8 +135,39 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString()
               <span>分享密码</span>
               <input v-model="shareForm.password" type="text" placeholder="留空则不设置密码" />
             </label>
+            <div class="field field-full">
+              <span>分享模式</span>
+              <div class="mode-segment" role="radiogroup" aria-label="分享模式">
+                <button
+                  class="mode-chip"
+                  :class="{ 'mode-chip-active': shareForm.shareMode === 'path_ctx' }"
+                  type="button"
+                  role="radio"
+                  :aria-checked="shareForm.shareMode === 'path_ctx'"
+                  @click="shareForm.shareMode = 'path_ctx'"
+                >
+                  <strong>路径上下文</strong>
+                  <small>/x/&lt;ctx-id&gt;/...</small>
+                </button>
+                <button
+                  class="mode-chip"
+                  :class="{ 'mode-chip-active': shareForm.shareMode === 'subdomain' }"
+                  type="button"
+                  role="radio"
+                  :aria-checked="shareForm.shareMode === 'subdomain'"
+                  @click="shareForm.shareMode = 'subdomain'"
+                >
+                  <strong>泛子域名</strong>
+                  <small>&lt;slug&gt;.域名</small>
+                </button>
+              </div>
+            </div>
+            <label v-if="shareForm.shareMode === 'subdomain'" class="field field-full">
+              <span>子域前缀</span>
+              <input v-model="shareForm.subdomainSlug" type="text" placeholder="留空自动生成10位随机串" />
+            </label>
           </div>
-          <p class="hint">不填写时默认有效期 24 小时，且不设置访问密码。</p>
+          <p class="hint">不填写时默认有效期 24 小时，且不设置访问密码。子域前缀留空会自动生成10位随机串。</p>
 
           <div class="actions-row">
             <button
@@ -202,6 +232,27 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString()
 .field span { color: var(--text-secondary); font-size: 12px; }
 .field input { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-solid); color: var(--text-main); font: inherit; padding: 9px 10px; }
 .field-full { grid-column: 1 / -1; }
+.mode-segment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mode-chip {
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--surface-solid);
+  color: var(--text-main);
+  cursor: pointer;
+  text-align: left;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+.mode-chip:hover { border-color: var(--accent-main); transform: translateY(-1px); }
+.mode-chip strong { font-size: 13px; line-height: 1.2; }
+.mode-chip small { color: var(--text-tertiary); font-size: 11px; }
+.mode-chip-active {
+  border-color: var(--accent-main);
+  background: color-mix(in srgb, var(--accent-main) 14%, var(--surface-solid));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-main) 55%, transparent);
+}
 .actions-row { display: flex; gap: 8px; }
 .actions-inline { justify-content: flex-end; }
 .button-primary, .button-subtle, .button-danger, .button-danger-soft { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-solid); color: var(--text-main); font: inherit; padding: 8px 12px; cursor: pointer; }

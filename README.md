@@ -109,6 +109,10 @@ go run ./cmd/nonav-gateway
 - `NONAV_DB_PATH`：默认 `./data/nonav.db`
 - `NONAV_WEB_DIST_DIR`：默认 `./web-dist`（仅作文件系统回退，可不设置）
 - `NONAV_PUBLIC_BASE_URL`：默认 `http://localhost:8080`
+- `NONAV_SHARE_SUBDOMAIN_ENABLED`：是否启用泛子域分享模式（默认 `false`）
+- `NONAV_SHARE_SUBDOMAIN_BASE`：泛子域根域名（如 `node.sourcedream.cn`）
+- `NONAV_LOG_LEVEL`：日志级别（默认 `info`）
+- `NONAV_LOG_ROUTE_TRACE`：是否打印网关路由追踪日志（默认 `true`）
 - `NONAV_CORS_ORIGIN`：默认 `http://localhost:8080`
 - `NONAV_DEFAULT_SHARE_TTL_HOURS`：默认 `24`
 - `NONAV_FORCE_FRP`：是否强制分享仅走 FRP 上游（默认 `false`）
@@ -122,7 +126,17 @@ go run ./cmd/nonav-gateway
 - `NONAV_FRP_SERVER_ADDR`：frps 地址（默认 `127.0.0.1`）
 - `NONAV_FRP_SERVER_PORT`：frps 端口（默认 `7000`）
 - `NONAV_FRP_AUTH_TOKEN`：frp token（默认 `nonav-local-dev`）
-- `NONAV_FRP_RECOVER_ON_START`：API 启动时是否自动恢复历史分享代理（默认 `false`）
+- `NONAV_FRP_RECOVER_ON_START`：API 启动时是否自动恢复历史分享代理（默认 `true`）
+
+分享模式说明：
+
+- `path_ctx`（默认）：链接为 `/s/<token>`，访问后网关会跳转到 `/x/<ctx-id>/...` 隔离上下文。
+- `subdomain`：链接为 `https://<slug>.<base-domain>/`，需开启 `NONAV_SHARE_SUBDOMAIN_ENABLED=true` 并配置 `NONAV_SHARE_SUBDOMAIN_BASE`。若不填写 `slug`，系统会自动生成 10 位随机前缀。
+
+排障提示：
+
+- 网关每个请求会返回 `X-Nonav-Gateway-Rev`、`X-Nonav-Req-Id`。
+- 子域链路会附带 `X-Nonav-Route`、`X-Nonav-Reason`、`X-Nonav-Subdomain-Slug`，可直接在浏览器 Network 或 curl 响应头里定位失败原因。
 
 ### 3) 启动前端
 

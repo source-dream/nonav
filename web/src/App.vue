@@ -149,7 +149,7 @@ const toggleTheme = async (event: MouseEvent) => {
   )
 }
 
-const addSite = async (payload: { name: string; url: string; groupName: string; icon: string }) => {
+const addSite = async (payload: { name: string; url: string; groupName: string }) => {
   try {
     const created = await api.createSite(payload)
     sites.value = [created, ...sites.value]
@@ -182,7 +182,7 @@ const closeSiteSettings = () => {
   showSiteSettingsDrawer.value = false
 }
 
-const saveSiteSettings = async (payload: { id: number; name: string; url: string; groupName: string; icon: string }) => {
+const saveSiteSettings = async (payload: { id: number; name: string; url: string; groupName: string }) => {
   savingSite.value = true
   try {
     const updated = await api.updateSite(payload)

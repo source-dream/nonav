@@ -6,6 +6,7 @@ import (
 )
 
 const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+const subdomainAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 func generateRandomToken(byteSize int) (string, error) {
 	b := make([]byte, byteSize)
@@ -28,4 +29,22 @@ func generateRandomPassword(length int) (string, error) {
 	}
 
 	return string(password), nil
+}
+
+func generateRandomSubdomainSlug(length int) (string, error) {
+	if length <= 0 {
+		length = 10
+	}
+
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	slug := make([]byte, length)
+	for idx, raw := range b {
+		slug[idx] = subdomainAlphabet[int(raw)%len(subdomainAlphabet)]
+	}
+
+	return string(slug), nil
 }

@@ -18,6 +18,8 @@ type Share struct {
 	SiteID     int64      `json:"siteId"`
 	SiteName   string     `json:"siteName"`
 	TargetURL  string     `json:"targetUrl"`
+	ShareMode  string     `json:"shareMode"`
+	Subdomain  string     `json:"subdomainSlug,omitempty"`
 	FRPPort    int        `json:"frpPort"`
 	Token      string     `json:"token"`
 	Status     string     `json:"status"`

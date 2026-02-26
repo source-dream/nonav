@@ -136,6 +136,18 @@ func (s *SQLiteStore) migrate() error {
 		return err
 	}
 
+	if err := s.ensureShareColumn("share_mode", "TEXT NOT NULL DEFAULT 'path_ctx'"); err != nil {
+		return err
+	}
+
+	if err := s.ensureShareColumn("subdomain_slug", "TEXT"); err != nil {
+		return err
+	}
+
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_subdomain_slug ON shares(subdomain_slug) WHERE subdomain_slug IS NOT NULL AND subdomain_slug <> ''`); err != nil {
+		return fmt.Errorf("create shares subdomain index: %w", err)
+	}
+
 	return nil
 }
 
@@ -340,9 +352,9 @@ func (s *SQLiteStore) GetSiteByID(ctx context.Context, siteID int64) (core.Site,
 func (s *SQLiteStore) CreateShare(ctx context.Context, share core.Share, passwordHash string) (core.Share, error) {
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO shares(site_id, target_url, frp_remote_port, token, password_hash, status, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, share.SiteID, share.TargetURL, share.FRPPort, share.Token, passwordHash, share.Status, share.ExpiresAt, now, now)
+		INSERT INTO shares(site_id, target_url, share_mode, subdomain_slug, frp_remote_port, token, password_hash, status, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, share.SiteID, share.TargetURL, share.ShareMode, nullableString(share.Subdomain), share.FRPPort, share.Token, passwordHash, share.Status, share.ExpiresAt, now, now)
 	if err != nil {
 		return core.Share{}, fmt.Errorf("create share: %w", err)
 	}
@@ -366,6 +378,8 @@ func (s *SQLiteStore) ListShares(ctx context.Context) ([]core.Share, error) {
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.share_mode,
+			COALESCE(sh.subdomain_slug, ''),
 			sh.frp_remote_port,
 			sh.token,
 			sh.status,
@@ -391,6 +405,8 @@ func (s *SQLiteStore) ListShares(ctx context.Context) ([]core.Share, error) {
 			&share.SiteID,
 			&share.SiteName,
 			&share.TargetURL,
+			&share.ShareMode,
+			&share.Subdomain,
 			&share.FRPPort,
 			&share.Token,
 			&share.Status,
@@ -418,6 +434,8 @@ func (s *SQLiteStore) GetShareByToken(ctx context.Context, token string) (core.S
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.share_mode,
+			COALESCE(sh.subdomain_slug, ''),
 			sh.frp_remote_port,
 			sh.token,
 			sh.status,
@@ -435,6 +453,8 @@ func (s *SQLiteStore) GetShareByToken(ctx context.Context, token string) (core.S
 		&share.SiteID,
 		&share.SiteName,
 		&share.TargetURL,
+		&share.ShareMode,
+		&share.Subdomain,
 		&share.FRPPort,
 		&share.Token,
 		&share.Status,
@@ -464,6 +484,8 @@ func (s *SQLiteStore) GetShareByID(ctx context.Context, shareID int64) (core.Sha
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.share_mode,
+			COALESCE(sh.subdomain_slug, ''),
 			sh.frp_remote_port,
 			sh.token,
 			sh.status,
@@ -481,6 +503,8 @@ func (s *SQLiteStore) GetShareByID(ctx context.Context, shareID int64) (core.Sha
 		&share.SiteID,
 		&share.SiteName,
 		&share.TargetURL,
+		&share.ShareMode,
+		&share.Subdomain,
 		&share.FRPPort,
 		&share.Token,
 		&share.Status,
@@ -508,6 +532,8 @@ func (s *SQLiteStore) ListSharesBySite(ctx context.Context, siteID int64) ([]cor
 			sh.site_id,
 			si.name,
 			sh.target_url,
+			sh.share_mode,
+			COALESCE(sh.subdomain_slug, ''),
 			sh.frp_remote_port,
 			sh.token,
 			sh.status,
@@ -534,6 +560,8 @@ func (s *SQLiteStore) ListSharesBySite(ctx context.Context, siteID int64) ([]cor
 			&share.SiteID,
 			&share.SiteName,
 			&share.TargetURL,
+			&share.ShareMode,
+			&share.Subdomain,
 			&share.FRPPort,
 			&share.Token,
 			&share.Status,
@@ -703,6 +731,65 @@ func (s *SQLiteStore) ValidateShareSession(ctx context.Context, shareID int64, s
 	}
 
 	return count > 0, nil
+}
+
+func (s *SQLiteStore) GetShareBySubdomain(ctx context.Context, slug string) (core.Share, string, error) {
+	var share core.Share
+	var passwordHash string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			sh.id,
+			sh.site_id,
+			si.name,
+			sh.target_url,
+			sh.share_mode,
+			COALESCE(sh.subdomain_slug, ''),
+			sh.frp_remote_port,
+			sh.token,
+			sh.status,
+			sh.expires_at,
+			sh.stopped_at,
+			sh.created_at,
+			sh.updated_at,
+			(SELECT COUNT(1) FROM share_access_logs sal WHERE sal.share_id = sh.id) AS access_hits,
+			sh.password_hash
+		FROM shares sh
+		INNER JOIN sites si ON si.id = sh.site_id
+		WHERE sh.subdomain_slug = ?
+		LIMIT 1
+	`, slug).Scan(
+		&share.ID,
+		&share.SiteID,
+		&share.SiteName,
+		&share.TargetURL,
+		&share.ShareMode,
+		&share.Subdomain,
+		&share.FRPPort,
+		&share.Token,
+		&share.Status,
+		&share.ExpiresAt,
+		&share.StoppedAt,
+		&share.CreatedAt,
+		&share.UpdatedAt,
+		&share.AccessHits,
+		&passwordHash,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.Share{}, "", ErrNotFound
+		}
+		return core.Share{}, "", fmt.Errorf("get share by subdomain: %w", err)
+	}
+
+	return share, passwordHash, nil
+}
+
+func nullableString(value string) any {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
 }
 
 func (s *SQLiteStore) PurgeExpiredShares(ctx context.Context) error {

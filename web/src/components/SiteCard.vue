@@ -23,10 +23,9 @@ const handleContext = (event: MouseEvent, site: Site) => {
 <template>
   <article class="site-card" @click="emit('open', site)" @contextmenu="handleContext($event, site)">
     <div class="site-card-top">
-      <span class="site-icon">{{ site.icon || '🌐' }}</span>
+      <h3 class="site-title">{{ site.name }}</h3>
       <span class="site-group">{{ site.groupName || '未分组' }}</span>
     </div>
-    <h3 class="site-title">{{ site.name }}</h3>
     <p class="site-url">{{ site.url }}</p>
     <footer class="site-meta">
       <span>访问 {{ site.clickCount }}</span>
@@ -41,7 +40,7 @@ const handleContext = (event: MouseEvent, site: Site) => {
 <style scoped>
 .site-card {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   padding: 14px;
   border-radius: 14px;
   border: 1px solid var(--line-soft);
@@ -57,19 +56,9 @@ const handleContext = (event: MouseEvent, site: Site) => {
 
 .site-card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-}
-
-.site-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  display: grid;
-  place-items: center;
-  font-size: 18px;
-  background: var(--surface-tint);
 }
 
 .site-group {
@@ -85,6 +74,8 @@ const handleContext = (event: MouseEvent, site: Site) => {
   font-size: 17px;
   color: var(--text-main);
   line-height: 1.2;
+  flex: 1;
+  min-width: 0;
 }
 
 .site-url {

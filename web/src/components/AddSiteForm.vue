@@ -5,7 +5,6 @@ interface CreateSitePayload {
   name: string
   url: string
   groupName: string
-  icon: string
 }
 
 const emit = defineEmits<{
@@ -16,7 +15,6 @@ const form = reactive({
   name: '',
   url: '',
   groupName: '',
-  icon: '',
 })
 
 const canSubmit = computed(() => form.name.trim().length > 0 && form.url.trim().length > 0)
@@ -30,13 +28,11 @@ const handleSubmit = () => {
     name: form.name.trim(),
     url: form.url.trim(),
     groupName: form.groupName.trim(),
-    icon: form.icon.trim(),
   })
 
   form.name = ''
   form.url = ''
   form.groupName = ''
-  form.icon = ''
 }
 </script>
 
@@ -46,9 +42,8 @@ const handleSubmit = () => {
       <input v-model="form.name" type="text" placeholder="站点名称" required />
       <input v-model="form.url" type="url" placeholder="https://intranet.example.local" required />
     </div>
-    <div class="field-group field-group-two">
+    <div class="field-group">
       <input v-model="form.groupName" type="text" placeholder="分组（可选）" />
-      <input v-model="form.icon" type="text" placeholder="图标Emoji（可选）" />
     </div>
     <button type="submit" :disabled="!canSubmit">添加网站</button>
   </form>

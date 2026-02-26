@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,19 +28,30 @@ import (
 )
 
 type Server struct {
-	cfg              config.Config
-	store            *store.SQLiteStore
-	mux              *http.ServeMux
-	apiProxy         *httputil.ReverseProxy
-	apiClient        *InternalAPIClient
-	frontendDevProxy *httputil.ReverseProxy
-	serveFrontend    bool
-	frpManager       *FRPProcessManager
-	frpsManager      *FRPServerProcessManager
-	siteLocks        sync.Map
+	cfg               config.Config
+	store             *store.SQLiteStore
+	mux               *http.ServeMux
+	apiProxy          *httputil.ReverseProxy
+	apiClient         *InternalAPIClient
+	frontendDevProxy  *httputil.ReverseProxy
+	serveFrontend     bool
+	frpManager        *FRPProcessManager
+	frpsManager       *FRPServerProcessManager
+	siteLocks         sync.Map
+	shareCtxMu        sync.Mutex
+	shareCtxByID      map[string]shareProxyContext
+	shareCtxIDByToken map[string]string
 }
 
 const apiTunnelShareID int64 = -1
+const gatewayRevisionHeaderValue = "20260226-sharectx-v5"
+
+type shareProxyContext struct {
+	ID          string
+	Share       core.Share
+	HasPassword bool
+	ExpiresAt   time.Time
+}
 
 func NewAPI(cfg config.Config, st *store.SQLiteStore) (*Server, error) {
 	s := &Server{
@@ -72,13 +85,15 @@ func NewGateway(cfg config.Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:              cfg,
-		mux:              http.NewServeMux(),
-		apiProxy:         httputil.NewSingleHostReverseProxy(apiURL),
-		apiClient:        NewInternalAPIClient(cfg.APIBaseURL),
-		frontendDevProxy: frontendProxy,
-		serveFrontend:    false,
-		frpsManager:      NewFRPServerProcessManager(cfg),
+		cfg:               cfg,
+		mux:               http.NewServeMux(),
+		apiProxy:          httputil.NewSingleHostReverseProxy(apiURL),
+		apiClient:         NewInternalAPIClient(cfg.APIBaseURL),
+		frontendDevProxy:  frontendProxy,
+		serveFrontend:     false,
+		frpsManager:       NewFRPServerProcessManager(cfg),
+		shareCtxByID:      make(map[string]shareProxyContext),
+		shareCtxIDByToken: make(map[string]string),
 	}
 
 	s.routesGateway()
@@ -133,7 +148,63 @@ func (s *Server) StopBackgroundServices() error {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reqID := s.newRequestID()
+	r = r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, reqID))
+	w.Header().Set("X-Nonav-Req-Id", reqID)
+	w.Header().Set("X-Nonav-Gateway-Rev", gatewayRevisionHeaderValue)
+	routingHost := requestRoutingHost(r)
+	w.Header().Set("X-Nonav-Routing-Host", routingHost)
+	s.logRoute(r, "request", map[string]any{
+		"host":         r.Host,
+		"routing_host": routingHost,
+		"method":       r.Method,
+		"path":         r.URL.Path,
+		"query":        r.URL.RawQuery,
+	})
 	s.mux.ServeHTTP(w, r)
+}
+
+type requestIDContextKey struct{}
+
+func (s *Server) newRequestID() string {
+	value, err := generateRandomToken(6)
+	if err != nil || strings.TrimSpace(value) == "" {
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return value
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return "-"
+	}
+	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func (s *Server) logRoute(r *http.Request, event string, extra map[string]any) {
+	if !s.cfg.LogRouteTrace {
+		return
+	}
+
+	payload := map[string]any{
+		"event": event,
+		"req":   requestIDFromContext(r.Context()),
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("route-log-marshal-failed req=%s event=%s", requestIDFromContext(r.Context()), event)
+		return
+	}
+
+	log.Printf("gateway_route %s", string(body))
 }
 
 func (s *Server) routesAPI() {
@@ -143,6 +214,7 @@ func (s *Server) routesAPI() {
 	s.mux.HandleFunc("/api/shares", s.withCORS(s.handleShares))
 	s.mux.HandleFunc("/api/shares/", s.withCORS(s.handleShareActions))
 	s.mux.HandleFunc("/api/internal/shares/token/", s.handleInternalShareByToken)
+	s.mux.HandleFunc("/api/internal/shares/subdomain/", s.handleInternalShareBySubdomain)
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
 
@@ -151,6 +223,7 @@ func (s *Server) routesGateway() {
 	s.mux.HandleFunc("/api/", s.handleAPIProxy)
 	s.mux.HandleFunc("/api", s.handleAPIProxy)
 	s.mux.HandleFunc("/s/", s.handleGateway)
+	s.mux.HandleFunc("/x/", s.handleGatewayContext)
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
 
@@ -324,22 +397,24 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
 		items := make([]map[string]any, 0, len(shares))
 		for _, share := range shares {
+			shareURL := s.buildShareURL(share)
 			items = append(items, map[string]any{
-				"id":         share.ID,
-				"siteId":     share.SiteID,
-				"siteName":   share.SiteName,
-				"frpPort":    share.FRPPort,
-				"token":      share.Token,
-				"status":     share.Status,
-				"expiresAt":  share.ExpiresAt,
-				"createdAt":  share.CreatedAt,
-				"updatedAt":  share.UpdatedAt,
-				"stoppedAt":  share.StoppedAt,
-				"accessHits": share.AccessHits,
-				"shareUrl":   fmt.Sprintf("%s/s/%s", baseURL, share.Token),
+				"id":            share.ID,
+				"siteId":        share.SiteID,
+				"siteName":      share.SiteName,
+				"shareMode":     share.ShareMode,
+				"subdomainSlug": share.Subdomain,
+				"frpPort":       share.FRPPort,
+				"token":         share.Token,
+				"status":        share.Status,
+				"expiresAt":     share.ExpiresAt,
+				"createdAt":     share.CreatedAt,
+				"updatedAt":     share.UpdatedAt,
+				"stoppedAt":     share.StoppedAt,
+				"accessHits":    share.AccessHits,
+				"shareUrl":      shareURL,
 			})
 		}
 
@@ -349,6 +424,8 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			SiteID         int64  `json:"siteId"`
 			ExpiresInHours int    `json:"expiresInHours"`
 			Password       string `json:"password"`
+			ShareMode      string `json:"shareMode"`
+			SubdomainSlug  string `json:"subdomainSlug"`
 		}
 
 		if err := decodeJSON(r, &payload); err != nil {
@@ -378,6 +455,35 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+
+		shareMode := strings.TrimSpace(payload.ShareMode)
+		if shareMode == "" {
+			shareMode = "path_ctx"
+		}
+		if shareMode != "path_ctx" && shareMode != "subdomain" {
+			respondError(w, http.StatusBadRequest, "shareMode must be path_ctx or subdomain")
+			return
+		}
+
+		subdomainSlug := ""
+		autoSubdomainSlug := false
+		if shareMode == "subdomain" {
+			if !s.cfg.ShareSubdomainOn || strings.TrimSpace(s.cfg.ShareSubdomainBase) == "" {
+				respondError(w, http.StatusBadRequest, "subdomain sharing is not enabled")
+				return
+			}
+
+			subdomainSlug = normalizeSubdomainSlug(payload.SubdomainSlug)
+			if subdomainSlug == "" {
+				randomSlug, slugErr := generateRandomSubdomainSlug(10)
+				if slugErr != nil {
+					respondError(w, http.StatusInternalServerError, "failed to generate subdomain slug")
+					return
+				}
+				subdomainSlug = randomSlug
+				autoSubdomainSlug = true
+			}
 		}
 
 		password := strings.TrimSpace(payload.Password)
@@ -441,27 +547,53 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		created, err := s.store.CreateShare(r.Context(), core.Share{
-			SiteID:    site.ID,
-			SiteName:  site.Name,
-			TargetURL: targetURL,
-			FRPPort:   frpPort,
-			Token:     shareToken,
-			Status:    "active",
-			ExpiresAt: time.Now().UTC().Add(expires),
-		}, passwordHash)
+		var created core.Share
+		for attempt := 0; attempt < 5; attempt++ {
+			created, err = s.store.CreateShare(r.Context(), core.Share{
+				SiteID:    site.ID,
+				SiteName:  site.Name,
+				TargetURL: targetURL,
+				ShareMode: shareMode,
+				Subdomain: subdomainSlug,
+				FRPPort:   frpPort,
+				Token:     shareToken,
+				Status:    "active",
+				ExpiresAt: time.Now().UTC().Add(expires),
+			}, passwordHash)
+			if err == nil {
+				break
+			}
+
+			if !isSubdomainConflictError(err) {
+				break
+			}
+
+			if !autoSubdomainSlug {
+				break
+			}
+
+			newSlug, slugErr := generateRandomSubdomainSlug(10)
+			if slugErr != nil {
+				err = slugErr
+				break
+			}
+			subdomainSlug = newSlug
+		}
 		if err != nil {
 			if s.cfg.ForceFRP {
 				_ = s.frpManager.StopProxy(site.ID)
+			}
+			if isSubdomainConflictError(err) {
+				respondError(w, http.StatusBadRequest, "subdomain slug already in use")
+				return
 			}
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
 		respondJSON(w, http.StatusCreated, core.ShareWithPassword{
 			Share:         created,
-			ShareURL:      fmt.Sprintf("%s/s/%s", baseURL, created.Token),
+			ShareURL:      s.buildShareURL(created),
 			PlainPassword: password,
 		})
 	default:
@@ -587,6 +719,34 @@ func (s *Server) handleInternalShareByToken(w http.ResponseWriter, r *http.Reque
 	respondError(w, http.StatusNotFound, "unknown internal share action")
 }
 
+func (s *Server) handleInternalShareBySubdomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondMethodNotAllowed(w)
+		return
+	}
+
+	slug := strings.TrimSpace(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/internal/shares/subdomain/"), "/"))
+	if slug == "" {
+		respondError(w, http.StatusBadRequest, "share subdomain missing")
+		return
+	}
+
+	share, passwordHash, err := s.store.GetShareBySubdomain(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "share not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"share":       share,
+		"hasPassword": strings.TrimSpace(passwordHash) != "",
+	})
+}
+
 func (s *Server) handleInternalShareAuth(w http.ResponseWriter, r *http.Request, share core.Share, passwordHash string) {
 	if r.Method != http.MethodPost {
 		respondMethodNotAllowed(w)
@@ -686,8 +846,13 @@ func (s *Server) handleInternalShareAccessLog(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
+	s.logRoute(r, "share_token_entry", map[string]any{"host": r.Host, "path": r.URL.Path})
+	w.Header().Set("X-Nonav-Route", "share_token")
+
 	shareToken, restPath, ok := parseSharePath(r.URL.Path)
 	if !ok {
+		w.Header().Set("X-Nonav-Reason", "share_path_not_found")
+		s.logRoute(r, "share_token_path_invalid", map[string]any{"path": r.URL.Path})
 		respondError(w, http.StatusNotFound, "share path not found")
 		return
 	}
@@ -695,22 +860,30 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	record, err := s.apiClient.GetShareByToken(r.Context(), shareToken)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
+			w.Header().Set("X-Nonav-Reason", "share_not_found")
+			s.logRoute(r, "share_token_not_found", map[string]any{"token": shareToken})
 			respondError(w, http.StatusNotFound, "share not found")
 			return
 		}
+		w.Header().Set("X-Nonav-Reason", "internal_api_unavailable")
+		s.logRoute(r, "share_token_internal_api_failed", map[string]any{"token": shareToken, "error": err.Error()})
 		respondError(w, http.StatusBadGateway, "internal api unavailable")
 		return
 	}
 	share := record.Share
 
 	if share.Status != "active" || time.Now().UTC().After(share.ExpiresAt) {
+		w.Header().Set("X-Nonav-Reason", "share_inactive")
+		s.logRoute(r, "share_token_inactive", map[string]any{"token": shareToken, "status": share.Status})
 		respondError(w, http.StatusGone, "share is no longer active")
 		return
 	}
 
 	if !record.HasPassword {
-		s.setShareRouteCookie(w, share)
-		s.proxyShareTarget(w, r, share, restPath)
+		if s.tryRedirectToSubdomainShare(w, r, share, restPath) {
+			return
+		}
+		s.redirectToShareContext(w, r, share, record.HasPassword, restPath)
 		return
 	}
 
@@ -719,25 +892,104 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionCookieName := shareSessionCookieName()
-	sessionCookie, err := r.Cookie(sessionCookieName)
-	if err != nil {
+	sessionToken, ok := getShareSessionTokenFromRequest(r, share.Token)
+	if !ok {
 		s.renderPasswordPage(w, r, share)
 		return
 	}
 
-	valid, err := s.apiClient.ValidateShareSession(r.Context(), share.Token, sessionCookie.Value)
+	valid, err := s.apiClient.ValidateShareSession(r.Context(), share.Token, sessionToken)
 	if err != nil || !valid {
 		s.renderPasswordPage(w, r, share)
 		return
 	}
 
-	s.setShareRouteCookie(w, share)
+	if s.tryRedirectToSubdomainShare(w, r, share, restPath) {
+		return
+	}
 
-	s.proxyShareTarget(w, r, share, restPath)
+	s.redirectToShareContext(w, r, share, record.HasPassword, restPath)
 }
 
-func (s *Server) proxyShareTarget(w http.ResponseWriter, r *http.Request, share core.Share, restPath string) {
+func (s *Server) tryRedirectToSubdomainShare(w http.ResponseWriter, r *http.Request, share core.Share, restPath string) bool {
+	if strings.TrimSpace(share.ShareMode) != "subdomain" {
+		return false
+	}
+	if !s.cfg.ShareSubdomainOn || strings.TrimSpace(s.cfg.ShareSubdomainBase) == "" {
+		return false
+	}
+
+	absolute := s.buildSubdomainURL(share, restPath, r.URL.RawQuery)
+	if absolute == "" {
+		return false
+	}
+
+	http.Redirect(w, r, absolute, http.StatusTemporaryRedirect)
+	return true
+}
+
+func (s *Server) redirectToShareContext(w http.ResponseWriter, r *http.Request, share core.Share, hasPassword bool, restPath string) {
+	ctxID, err := s.createOrGetShareContext(share, hasPassword)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "create share context failed")
+		return
+	}
+
+	targetURL := ensureContextPathPrefix(restPath, ctxID)
+	if strings.TrimSpace(r.URL.RawQuery) != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+}
+
+func (s *Server) handleGatewayContext(w http.ResponseWriter, r *http.Request) {
+	s.logRoute(r, "share_ctx_entry", map[string]any{"host": r.Host, "path": r.URL.Path})
+	w.Header().Set("X-Nonav-Route", "path_ctx")
+
+	ctxID, restPath, ok := parseShareContextPath(r.URL.Path)
+	if !ok {
+		w.Header().Set("X-Nonav-Reason", "ctx_path_not_found")
+		s.logRoute(r, "share_ctx_path_invalid", map[string]any{"path": r.URL.Path})
+		respondError(w, http.StatusNotFound, "share context path not found")
+		return
+	}
+
+	shareCtx, ok := s.getShareContext(ctxID)
+	if !ok {
+		w.Header().Set("X-Nonav-Reason", "ctx_not_found")
+		s.logRoute(r, "share_ctx_not_found", map[string]any{"ctx_id": ctxID})
+		respondError(w, http.StatusNotFound, "share context not found")
+		return
+	}
+
+	if shareCtx.Share.Status != "active" || time.Now().UTC().After(shareCtx.Share.ExpiresAt) {
+		s.deleteShareContext(ctxID)
+		w.Header().Set("X-Nonav-Reason", "share_inactive")
+		s.logRoute(r, "share_ctx_inactive", map[string]any{"ctx_id": ctxID, "status": shareCtx.Share.Status})
+		respondError(w, http.StatusGone, "share is no longer active")
+		return
+	}
+
+	if shareCtx.HasPassword {
+		sessionToken, hasSession := getShareSessionTokenFromRequest(r, shareCtx.Share.Token)
+		if !hasSession {
+			respondError(w, http.StatusUnauthorized, "share session required")
+			return
+		}
+
+		valid, err := s.apiClient.ValidateShareSession(r.Context(), shareCtx.Share.Token, sessionToken)
+		if err != nil || !valid {
+			respondError(w, http.StatusUnauthorized, "share session invalid")
+			return
+		}
+	}
+
+	s.proxyShareTarget(w, r, shareCtx, restPath)
+}
+
+func (s *Server) proxyShareTarget(w http.ResponseWriter, r *http.Request, shareCtx shareProxyContext, restPath string) {
+	share := shareCtx.Share
 	targetRaw := share.TargetURL
 	if s.cfg.ForceFRP {
 		if !isShareAllowedInForceFRP(share, s.cfg) {
@@ -759,14 +1011,25 @@ func (s *Server) proxyShareTarget(w http.ResponseWriter, r *http.Request, share 
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.URL.Path = joinURLPath(targetURL.Path, restPath)
+		req.URL.RawQuery = sanitizeContextQuery(req.URL.Query())
 		req.Host = targetURL.Host
 		req.Header.Set("X-Forwarded-Host", r.Host)
 		req.Header.Set("X-Forwarded-Proto", forwardedProto(r))
-		rewriteProxyOriginHeaders(req, targetURL, share.Token)
+		rewriteProxyOriginHeaders(req, targetURL, share.Token, shareCtx.ID)
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		rewriteShareLocationHeader(resp, share.Token, r.Host)
+		s.logRoute(r, "proxy_response", map[string]any{"status": resp.StatusCode, "upstream": targetURL.Host, "path": restPath})
+		rewriteShareLocationHeader(resp, shareCtx.ID, r.Host)
+		if err := injectShareContextScript(resp, shareCtx.ID); err != nil {
+			return err
+		}
+		if err := rewriteJavaScriptModuleResponse(resp, shareCtx.ID); err != nil {
+			return err
+		}
+		if err := rewriteVueStyleModuleResponse(resp, shareCtx.ID); err != nil {
+			return err
+		}
 
 		if s.apiClient != nil {
 			s.apiClient.LogShareAccess(context.Background(), share.Token, r.Method, r.URL.Path, clientIP(r), resp.StatusCode)
@@ -775,6 +1038,8 @@ func (s *Server) proxyShareTarget(w http.ResponseWriter, r *http.Request, share 
 	}
 
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+		s.logRoute(req, "proxy_error", map[string]any{"error": proxyErr.Error(), "upstream": targetURL.Host, "path": req.URL.Path})
+		rw.Header().Set("X-Nonav-Reason", "proxy_failed")
 		if s.apiClient != nil {
 			s.apiClient.LogShareAccess(context.Background(), share.Token, req.Method, req.URL.Path, clientIP(req), http.StatusBadGateway)
 		}
@@ -806,10 +1071,8 @@ func (s *Server) handleShareAuthByAPI(w http.ResponseWriter, r *http.Request, sh
 		return
 	}
 
-	s.setShareRouteCookie(w, share)
-
 	http.SetCookie(w, &http.Cookie{
-		Name:     shareSessionCookieName(),
+		Name:     shareSessionCookieName(share.Token),
 		Value:    sessionToken,
 		Path:     shareSessionCookiePath(share.Token),
 		Expires:  expiresAt,
@@ -918,6 +1181,49 @@ func parseSharePath(path string) (string, string, bool) {
 	return token, rest, true
 }
 
+func parseShareContextPath(path string) (string, string, bool) {
+	trimmed := strings.TrimPrefix(path, "/x/")
+	if trimmed == path || trimmed == "" {
+		return "", "", false
+	}
+
+	parts := strings.SplitN(trimmed, "/", 2)
+	ctxID := strings.TrimSpace(parts[0])
+	if ctxID == "" {
+		return "", "", false
+	}
+
+	rest := "/"
+	if len(parts) == 2 {
+		rest = "/" + parts[1]
+	}
+
+	return ctxID, rest, true
+}
+
+func ensureContextPathPrefix(path string, ctxID string) string {
+	prefix := "/x/" + strings.TrimSpace(ctxID)
+	if strings.HasPrefix(path, prefix) {
+		return path
+	}
+
+	if path == "" || path == "/" {
+		return prefix + "/"
+	}
+
+	if strings.HasPrefix(path, "/") {
+		return prefix + path
+	}
+
+	return prefix + "/" + path
+}
+
+func sanitizeContextQuery(query url.Values) string {
+	clean := query
+	clean.Del("__nonav_share")
+	return clean.Encode()
+}
+
 func joinURLPath(basePath string, childPath string) string {
 	basePath = strings.TrimSuffix(basePath, "/")
 	if childPath == "/" {
@@ -928,6 +1234,141 @@ func joinURLPath(basePath string, childPath string) string {
 	}
 
 	return basePath + childPath
+}
+
+func normalizeSubdomainSlug(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	prevDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			prevDash = false
+			continue
+		}
+
+		if r == '-' || r == '_' || r == ' ' {
+			if !prevDash {
+				builder.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+
+	slug := strings.Trim(builder.String(), "-")
+	if len(slug) > 63 {
+		slug = strings.Trim(slug[:63], "-")
+	}
+
+	return slug
+}
+
+func isSubdomainConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "idx_shares_subdomain_slug") || strings.Contains(lower, "subdomain_slug")
+}
+
+func (s *Server) buildShareURL(share core.Share) string {
+	baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
+	mode := strings.TrimSpace(share.ShareMode)
+	if mode == "" {
+		mode = "path_ctx"
+	}
+
+	if mode == "subdomain" && s.cfg.ShareSubdomainOn {
+		if absolute := s.buildSubdomainURL(share, "/", ""); absolute != "" {
+			return absolute
+		}
+	}
+
+	return fmt.Sprintf("%s/s/%s", baseURL, share.Token)
+}
+
+func (s *Server) buildSubdomainURL(share core.Share, path string, rawQuery string) string {
+	slug := normalizeSubdomainSlug(share.Subdomain)
+	baseDomain := strings.TrimSpace(strings.ToLower(s.cfg.ShareSubdomainBase))
+	if slug == "" || baseDomain == "" {
+		return ""
+	}
+
+	baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+
+	parsed.Host = slug + "." + baseDomain
+	if parsed.Scheme == "" {
+		parsed.Scheme = "https"
+	}
+
+	if strings.TrimSpace(path) == "" {
+		path = "/"
+	}
+	parsed.Path = path
+	parsed.RawQuery = strings.TrimSpace(rawQuery)
+	parsed.Fragment = ""
+
+	return parsed.String()
+}
+
+func extractShareSubdomainSlug(hostWithPort string, baseDomain string) (string, bool) {
+	base := strings.TrimSpace(strings.ToLower(baseDomain))
+	if base == "" {
+		return "", false
+	}
+
+	host := strings.ToLower(strings.TrimSpace(hostWithPort))
+	if strings.Contains(host, ":") {
+		h, _, err := net.SplitHostPort(host)
+		if err == nil {
+			host = h
+		}
+	}
+
+	if host == base {
+		return "", false
+	}
+
+	suffix := "." + base
+	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+
+	slug := strings.TrimSuffix(host, suffix)
+	if slug == "" || strings.Contains(slug, ".") {
+		return "", false
+	}
+
+	return slug, true
+}
+
+func requestRoutingHost(r *http.Request) string {
+	forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if forwardedHost != "" {
+		parts := strings.Split(forwardedHost, ",")
+		if len(parts) > 0 {
+			candidate := strings.TrimSpace(parts[0])
+			if candidate != "" {
+				return candidate
+			}
+		}
+	}
+
+	originalHost := strings.TrimSpace(r.Header.Get("X-Original-Host"))
+	if originalHost != "" {
+		return originalHost
+	}
+
+	return strings.TrimSpace(r.Host)
 }
 
 func conditionalMessage(msg string) string {
@@ -973,7 +1414,7 @@ func forwardedProto(r *http.Request) string {
 	return "http"
 }
 
-func rewriteProxyOriginHeaders(req *http.Request, targetURL *url.URL, shareToken string) {
+func rewriteProxyOriginHeaders(req *http.Request, targetURL *url.URL, shareToken string, ctxID string) {
 	targetOrigin := targetURL.Scheme + "://" + targetURL.Host
 
 	if shouldStripOriginForStatic(req.URL.Path, req.Method) {
@@ -998,11 +1439,21 @@ func rewriteProxyOriginHeaders(req *http.Request, targetURL *url.URL, shareToken
 		return
 	}
 
-	token, restPath, ok := parseSharePath(parsedReferer.Path)
-	if ok && token == shareToken {
+	ctxToken, restPath, ok := parseShareContextPath(parsedReferer.Path)
+	if ok && ctxToken == ctxID {
 		parsedReferer.Scheme = targetURL.Scheme
 		parsedReferer.Host = targetURL.Host
 		parsedReferer.Path = joinURLPath(targetURL.Path, restPath)
+		parsedReferer.RawQuery = sanitizeContextQuery(parsedReferer.Query())
+		req.Header.Set("Referer", parsedReferer.String())
+		return
+	}
+
+	token, shareRestPath, shareMatched := parseSharePath(parsedReferer.Path)
+	if shareMatched && token == shareToken {
+		parsedReferer.Scheme = targetURL.Scheme
+		parsedReferer.Host = targetURL.Host
+		parsedReferer.Path = joinURLPath(targetURL.Path, shareRestPath)
 		req.Header.Set("Referer", parsedReferer.String())
 		return
 	}
@@ -1037,11 +1488,34 @@ func shouldStripOriginForStatic(path string, method string) bool {
 	return false
 }
 
+func isWebSocketRequest(r *http.Request) bool {
+	connection := strings.ToLower(strings.TrimSpace(r.Header.Get("Connection")))
+	if connection == "" || !strings.Contains(connection, "upgrade") {
+		return false
+	}
+
+	upgrade := strings.TrimSpace(r.Header.Get("Upgrade"))
+	return strings.EqualFold(upgrade, "websocket")
+}
+
+func isLikelyDocumentRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")), "document") {
+		return true
+	}
+
+	accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	return strings.Contains(accept, "text/html")
+}
+
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	if !s.serveFrontend {
-		if s.tryRedirectToSharePrefixedPath(w, r) {
+		if s.tryHandleSubdomainShareRequest(w, r) {
 			return
 		}
+		w.Header().Set("X-Nonav-Route", "fallback")
+		w.Header().Set("X-Nonav-Reason", "gateway_non_share_path")
+		s.logRoute(r, "fallback_not_found", map[string]any{"host": r.Host, "path": r.URL.Path})
+
 		http.NotFound(w, r)
 		return
 	}
@@ -1106,56 +1580,90 @@ func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIProxy(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/api/internal/") {
-		respondError(w, http.StatusNotFound, "not found")
+	if s.tryHandleSubdomainShareRequest(w, r) {
 		return
 	}
-
-	if s.tryProxyShareAPIRequest(w, r) {
-		return
-	}
+	w.Header().Set("X-Nonav-Route", "fallback")
+	w.Header().Set("X-Nonav-Reason", "api_proxy_not_matched")
+	s.logRoute(r, "api_proxy_not_matched", map[string]any{"path": r.URL.Path})
 
 	http.NotFound(w, r)
 }
 
-func (s *Server) tryProxyShareAPIRequest(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) tryHandleSubdomainShareRequest(w http.ResponseWriter, r *http.Request) bool {
 	if s.apiClient == nil {
 		return false
 	}
 
-	referer := strings.TrimSpace(r.Header.Get("Referer"))
-	if referer == "" {
-		return false
-	}
-
-	token, ok := shareTokenFromReferer(referer)
+	routingHost := requestRoutingHost(r)
+	slug, ok := extractShareSubdomainSlug(routingHost, s.cfg.ShareSubdomainBase)
 	if !ok {
+		s.logRoute(r, "subdomain_not_matched", map[string]any{"host": r.Host, "routing_host": routingHost, "base": s.cfg.ShareSubdomainBase})
+		if strings.EqualFold(strings.TrimSpace(routingHost), "localhost") || strings.HasPrefix(strings.TrimSpace(routingHost), "localhost:") {
+			s.logRoute(r, "subdomain_proxy_host_warning", map[string]any{"hint": "proxy should preserve Host or set X-Forwarded-Host", "host": r.Host, "routing_host": routingHost})
+		}
 		return false
 	}
 
-	record, err := s.apiClient.GetShareByToken(r.Context(), token)
+	w.Header().Set("X-Nonav-Route", "subdomain")
+	w.Header().Set("X-Nonav-Subdomain-Slug", slug)
+	s.logRoute(r, "subdomain_matched", map[string]any{"host": r.Host, "routing_host": routingHost, "slug": slug, "base": s.cfg.ShareSubdomainBase})
+
+	if !s.cfg.ShareSubdomainOn {
+		w.Header().Set("X-Nonav-Reason", "subdomain_disabled")
+		s.logRoute(r, "subdomain_disabled", map[string]any{"slug": slug})
+		respondError(w, http.StatusServiceUnavailable, "subdomain sharing is disabled")
+		return true
+	}
+
+	startedAt := time.Now()
+	record, err := s.apiClient.GetShareBySubdomain(r.Context(), slug)
 	if err != nil {
-		return false
-	}
-	share := record.Share
-
-	if share.Status != "active" || time.Now().UTC().After(share.ExpiresAt) {
-		return false
-	}
-
-	if record.HasPassword {
-		sessionCookie, cookieErr := r.Cookie(shareSessionCookieName())
-		if cookieErr != nil {
-			return false
+		if errors.Is(err, errNotFound) {
+			w.Header().Set("X-Nonav-Reason", "subdomain_share_not_found")
+			s.logRoute(r, "subdomain_share_not_found", map[string]any{"slug": slug, "latency_ms": time.Since(startedAt).Milliseconds()})
+			respondError(w, http.StatusNotFound, "subdomain share not found")
+			return true
 		}
 
-		valid, validErr := s.apiClient.ValidateShareSession(r.Context(), share.Token, sessionCookie.Value)
-		if validErr != nil || !valid {
-			return false
+		w.Header().Set("X-Nonav-Reason", "internal_api_unavailable")
+		s.logRoute(r, "subdomain_internal_api_failed", map[string]any{"slug": slug, "error": err.Error(), "latency_ms": time.Since(startedAt).Milliseconds()})
+		respondError(w, http.StatusBadGateway, "internal api unavailable")
+		return true
+	}
+	s.logRoute(r, "subdomain_share_loaded", map[string]any{"slug": slug, "token": record.Share.Token, "latency_ms": time.Since(startedAt).Milliseconds()})
+
+	shareCtx := shareProxyContext{
+		Share:       record.Share,
+		HasPassword: record.HasPassword,
+	}
+
+	if shareCtx.Share.Status != "active" || time.Now().UTC().After(shareCtx.Share.ExpiresAt) {
+		w.Header().Set("X-Nonav-Reason", "share_inactive")
+		s.logRoute(r, "subdomain_share_inactive", map[string]any{"slug": slug, "status": shareCtx.Share.Status})
+		respondError(w, http.StatusGone, "share is no longer active")
+		return true
+	}
+
+	if shareCtx.HasPassword {
+		sessionToken, hasSession := getShareSessionTokenFromRequest(r, shareCtx.Share.Token)
+		if !hasSession {
+			s.logRoute(r, "subdomain_password_required", map[string]any{"slug": slug})
+			s.renderPasswordPage(w, r, shareCtx.Share)
+			return true
+		}
+
+		valid, validateErr := s.apiClient.ValidateShareSession(r.Context(), shareCtx.Share.Token, sessionToken)
+		if validateErr != nil || !valid {
+			w.Header().Set("X-Nonav-Reason", "share_session_invalid")
+			s.logRoute(r, "subdomain_session_invalid", map[string]any{"slug": slug})
+			s.renderPasswordPage(w, r, shareCtx.Share)
+			return true
 		}
 	}
 
-	s.proxyShareTarget(w, r, share, r.URL.Path)
+	s.logRoute(r, "subdomain_proxy_start", map[string]any{"slug": slug, "path": r.URL.Path})
+	s.proxyShareTarget(w, r, shareCtx, r.URL.Path)
 	return true
 }
 
@@ -1165,12 +1673,13 @@ func hasFileExtension(path string) bool {
 	return ext != ""
 }
 
-func shareSessionCookieName() string {
-	return "nonav_share_session"
-}
+func shareSessionCookieName(shareToken string) string {
+	cleanToken := strings.TrimSpace(shareToken)
+	if cleanToken == "" {
+		return "nonav_share_session"
+	}
 
-func shareRouteCookieName() string {
-	return "nonav_share_route"
+	return "nonav_share_session_" + cleanToken
 }
 
 func shareSessionCookiePath(shareToken string) string {
@@ -1178,57 +1687,24 @@ func shareSessionCookiePath(shareToken string) string {
 	return "/"
 }
 
-func (s *Server) setShareRouteCookie(w http.ResponseWriter, share core.Share) {
-	expiresAt := time.Now().UTC().Add(8 * time.Hour)
-	if share.ExpiresAt.Before(expiresAt) {
-		expiresAt = share.ExpiresAt
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     shareRouteCookieName(),
-		Value:    share.Token,
-		Path:     "/",
-		Expires:  expiresAt,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func (s *Server) tryRedirectToSharePrefixedPath(w http.ResponseWriter, r *http.Request) bool {
-	if strings.HasPrefix(r.URL.Path, "/s/") || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" || r.URL.Path == "/healthz" {
-		return false
-	}
-
-	token := resolveShareTokenFromRequest(r)
-	if token == "" {
-		return false
-	}
-
-	targetPath := ensureSharePathPrefix(r.URL.Path, token)
-	targetURL := targetPath
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
-
-	http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
-	return true
-}
-
-func resolveShareTokenFromRequest(r *http.Request) string {
-	referer := strings.TrimSpace(r.Header.Get("Referer"))
-	if referer != "" {
-		refererToken, ok := shareTokenFromReferer(referer)
-		if ok {
-			return refererToken
+func getShareSessionTokenFromRequest(r *http.Request, shareToken string) (string, bool) {
+	specificCookie, specificErr := r.Cookie(shareSessionCookieName(shareToken))
+	if specificErr == nil {
+		value := strings.TrimSpace(specificCookie.Value)
+		if value != "" {
+			return value, true
 		}
 	}
 
-	routeCookie, cookieErr := r.Cookie(shareRouteCookieName())
-	if cookieErr == nil {
-		return strings.TrimSpace(routeCookie.Value)
+	legacyCookie, legacyErr := r.Cookie(shareSessionCookieName(""))
+	if legacyErr == nil {
+		value := strings.TrimSpace(legacyCookie.Value)
+		if value != "" {
+			return value, true
+		}
 	}
 
-	return ""
+	return "", false
 }
 
 func (s *Server) localFrontendAssetExists(requestPath string) bool {
@@ -1311,20 +1787,6 @@ func (s *Server) tryServeEmbeddedFrontendFile(w http.ResponseWriter, r *http.Req
 
 	http.ServeFileFS(w, r, frontendFS, clean)
 	return true
-}
-
-func shareTokenFromReferer(referer string) (string, bool) {
-	parsed, err := url.Parse(referer)
-	if err != nil {
-		return "", false
-	}
-
-	token, _, ok := parseSharePath(parsed.Path)
-	if !ok {
-		return "", false
-	}
-
-	return token, true
 }
 
 func ensureUpstreamReachable(rawURL string) error {
@@ -1522,6 +1984,87 @@ func (s *Server) lockSite(siteID int64) func() {
 	}
 }
 
+func (s *Server) createOrGetShareContext(share core.Share, hasPassword bool) (string, error) {
+	now := time.Now().UTC()
+
+	s.shareCtxMu.Lock()
+	defer s.shareCtxMu.Unlock()
+
+	s.cleanupExpiredShareContextsLocked(now)
+
+	if existingID, ok := s.shareCtxIDByToken[share.Token]; ok {
+		if existingCtx, ok := s.shareCtxByID[existingID]; ok {
+			if now.Before(existingCtx.ExpiresAt) {
+				return existingID, nil
+			}
+		}
+	}
+
+	ctxID, err := generateRandomToken(18)
+	if err != nil {
+		return "", err
+	}
+
+	expiresAt := now.Add(8 * time.Hour)
+	if share.ExpiresAt.Before(expiresAt) {
+		expiresAt = share.ExpiresAt
+	}
+
+	shareCtx := shareProxyContext{
+		ID:          ctxID,
+		Share:       share,
+		HasPassword: hasPassword,
+		ExpiresAt:   expiresAt,
+	}
+
+	s.shareCtxByID[ctxID] = shareCtx
+	s.shareCtxIDByToken[share.Token] = ctxID
+
+	return ctxID, nil
+}
+
+func (s *Server) getShareContext(ctxID string) (shareProxyContext, bool) {
+	now := time.Now().UTC()
+
+	s.shareCtxMu.Lock()
+	defer s.shareCtxMu.Unlock()
+
+	shareCtx, ok := s.shareCtxByID[ctxID]
+	if !ok {
+		return shareProxyContext{}, false
+	}
+
+	if now.After(shareCtx.ExpiresAt) {
+		delete(s.shareCtxByID, ctxID)
+		delete(s.shareCtxIDByToken, shareCtx.Share.Token)
+		return shareProxyContext{}, false
+	}
+
+	return shareCtx, true
+}
+
+func (s *Server) deleteShareContext(ctxID string) {
+	s.shareCtxMu.Lock()
+	defer s.shareCtxMu.Unlock()
+
+	shareCtx, ok := s.shareCtxByID[ctxID]
+	if !ok {
+		return
+	}
+
+	delete(s.shareCtxByID, ctxID)
+	delete(s.shareCtxIDByToken, shareCtx.Share.Token)
+}
+
+func (s *Server) cleanupExpiredShareContextsLocked(now time.Time) {
+	for ctxID, shareCtx := range s.shareCtxByID {
+		if now.After(shareCtx.ExpiresAt) {
+			delete(s.shareCtxByID, ctxID)
+			delete(s.shareCtxIDByToken, shareCtx.Share.Token)
+		}
+	}
+}
+
 func (s *Server) RecoverFRPProxies(ctx context.Context) error {
 	if !s.cfg.ForceFRP {
 		return nil
@@ -1593,7 +2136,238 @@ func rewriteShareLocationHeader(resp *http.Response, shareToken string, requestH
 	resp.Header.Set("Location", rewritten)
 }
 
-func rewriteShareLocation(rawLocation string, shareToken string, requestHost string) (string, bool) {
+func injectShareContextScript(resp *http.Response, ctxID string) error {
+	if resp == nil || resp.Request == nil {
+		return nil
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	if !strings.Contains(contentType, "text/html") {
+		return nil
+	}
+
+	if strings.TrimSpace(resp.Header.Get("Content-Encoding")) != "" {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+
+	htmlText := string(body)
+	if strings.Contains(htmlText, "id=\"__nonav_ctx_prefix_script\"") {
+		resp.Body = io.NopCloser(strings.NewReader(htmlText))
+		resp.ContentLength = int64(len(htmlText))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(htmlText)))
+		return nil
+	}
+
+	cleanCtxID := strings.TrimSpace(ctxID)
+	if cleanCtxID == "" {
+		resp.Body = io.NopCloser(strings.NewReader(htmlText))
+		resp.ContentLength = int64(len(htmlText))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(htmlText)))
+		return nil
+	}
+
+	htmlText = strings.ReplaceAll(htmlText, "src=\"/", "src=\"/x/"+cleanCtxID+"/")
+	htmlText = strings.ReplaceAll(htmlText, "href=\"/", "href=\"/x/"+cleanCtxID+"/")
+	htmlText = strings.ReplaceAll(htmlText, "action=\"/", "action=\"/x/"+cleanCtxID+"/")
+
+	script := buildShareContextScript(cleanCtxID)
+	injectAt := strings.LastIndex(strings.ToLower(htmlText), "</head>")
+	if injectAt >= 0 {
+		htmlText = htmlText[:injectAt] + script + htmlText[injectAt:]
+	} else {
+		htmlText = script + htmlText
+	}
+
+	resp.Body = io.NopCloser(strings.NewReader(htmlText))
+	resp.ContentLength = int64(len(htmlText))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(htmlText)))
+	resp.Header.Del("ETag")
+
+	return nil
+}
+
+func buildShareContextScript(ctxID string) string {
+	prefixLiteral := strconv.Quote("/x/" + strings.TrimSpace(ctxID))
+
+	return "<script id=\"__nonav_ctx_prefix_script\">(function(){" +
+		"var PREFIX=" + prefixLiteral + ";" +
+		"function withCtx(input){try{if(typeof input!=='string'){return input;}var abs=new URL(input,window.location.href);if(abs.origin!==window.location.origin){return input;}" +
+		"if(abs.pathname===PREFIX||abs.pathname.indexOf(PREFIX+'/')===0){return abs.pathname+abs.search+abs.hash;}" +
+		"abs.pathname=PREFIX+(abs.pathname==='/'?'':abs.pathname);return abs.pathname+abs.search+abs.hash;}catch(_e){return input;}}" +
+		"var push=history.pushState;history.pushState=function(s,t,url){if(typeof url==='string'){url=withCtx(url);}return push.call(this,s,t,url);};" +
+		"var replace=history.replaceState;history.replaceState=function(s,t,url){if(typeof url==='string'){url=withCtx(url);}return replace.call(this,s,t,url);};" +
+		"if(window.fetch){var oldFetch=window.fetch;window.fetch=function(input,init){if(typeof input==='string'){input=withCtx(input);}return oldFetch.call(this,input,init);};}" +
+		"if(window.XMLHttpRequest&&window.XMLHttpRequest.prototype&&window.XMLHttpRequest.prototype.open){var oldOpen=window.XMLHttpRequest.prototype.open;window.XMLHttpRequest.prototype.open=function(method,url){if(typeof url==='string'){url=withCtx(url);}return oldOpen.apply(this,[method,url].concat([].slice.call(arguments,2)));};}" +
+		"})();</script>"
+}
+
+func rewriteVueStyleModuleResponse(resp *http.Response, ctxID string) error {
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return nil
+	}
+
+	query := resp.Request.URL.Query()
+	if _, hasVue := query["vue"]; !hasVue || query.Get("type") != "style" {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+
+	cssText := string(body)
+	trimmed := strings.TrimSpace(cssText)
+	if trimmed == "" {
+		resp.Body = io.NopCloser(strings.NewReader(cssText))
+		resp.ContentLength = int64(len(cssText))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(cssText)))
+		return nil
+	}
+
+	if strings.HasPrefix(trimmed, "import ") || strings.Contains(trimmed, "__vite__updateStyle") {
+		resp.Body = io.NopCloser(strings.NewReader(cssText))
+		resp.ContentLength = int64(len(cssText))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(cssText)))
+		return nil
+	}
+
+	moduleID := withContextPathPrefix(resp.Request.URL.Path, ctxID)
+	if resp.Request.URL.RawQuery != "" {
+		moduleID += "?" + sanitizeContextQuery(resp.Request.URL.Query())
+	}
+
+	wrapped := "import { updateStyle as __vite__updateStyle, removeStyle as __vite__removeStyle } from \"" + withContextPathPrefix("/@vite/client", ctxID) + "\"\n" +
+		"const __vite__id = " + strconv.Quote(moduleID) + "\n" +
+		"const __vite__css = " + strconv.Quote(cssText) + "\n" +
+		"__vite__updateStyle(__vite__id, __vite__css)\n" +
+		"if (import.meta.hot) {\n" +
+		"  import.meta.hot.accept()\n" +
+		"  import.meta.hot.prune(() => __vite__removeStyle(__vite__id))\n" +
+		"}\n"
+
+	resp.Body = io.NopCloser(strings.NewReader(wrapped))
+	resp.ContentLength = int64(len(wrapped))
+	resp.Header.Set("Content-Type", "text/javascript")
+	resp.Header.Set("Content-Length", strconv.Itoa(len(wrapped)))
+	resp.Header.Del("ETag")
+	resp.Header.Del("Content-Encoding")
+
+	return nil
+}
+
+var (
+	reModuleImportFromDouble = regexp.MustCompile(`from\s+"(/[^"\n]+)"`)
+	reModuleImportFromSingle = regexp.MustCompile(`from\s+'(/[^'\n]+)'`)
+	reModuleImportBareDouble = regexp.MustCompile(`import\s+"(/[^"\n]+)"`)
+	reModuleImportBareSingle = regexp.MustCompile(`import\s+'(/[^'\n]+)'`)
+	reModuleImportDynDouble  = regexp.MustCompile(`import\(\s*"(/[^"\n]+)"\s*\)`)
+	reModuleImportDynSingle  = regexp.MustCompile(`import\(\s*'(/[^'\n]+)'\s*\)`)
+)
+
+func rewriteJavaScriptModuleResponse(resp *http.Response, ctxID string) error {
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return nil
+	}
+
+	if strings.TrimSpace(resp.Header.Get("Content-Encoding")) != "" {
+		return nil
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	if !strings.Contains(contentType, "javascript") && !strings.Contains(contentType, "ecmascript") {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+
+	original := string(body)
+	rewritten := rewriteModuleImportSpecifiers(original, ctxID)
+	if rewritten == original {
+		resp.Body = io.NopCloser(strings.NewReader(original))
+		resp.ContentLength = int64(len(original))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(original)))
+		return nil
+	}
+
+	resp.Body = io.NopCloser(strings.NewReader(rewritten))
+	resp.ContentLength = int64(len(rewritten))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+	resp.Header.Del("ETag")
+
+	return nil
+}
+
+func rewriteModuleImportSpecifiers(code string, ctxID string) string {
+	if strings.TrimSpace(ctxID) == "" || code == "" {
+		return code
+	}
+
+	patterns := []*regexp.Regexp{
+		reModuleImportFromDouble,
+		reModuleImportFromSingle,
+		reModuleImportBareDouble,
+		reModuleImportBareSingle,
+		reModuleImportDynDouble,
+		reModuleImportDynSingle,
+	}
+
+	out := code
+	for _, re := range patterns {
+		out = re.ReplaceAllStringFunc(out, func(m string) string {
+			sub := re.FindStringSubmatch(m)
+			if len(sub) < 2 {
+				return m
+			}
+
+			originalPath := sub[1]
+			rewrittenPath := withContextPathPrefix(originalPath, ctxID)
+			if rewrittenPath == originalPath {
+				return m
+			}
+
+			return strings.Replace(m, originalPath, rewrittenPath, 1)
+		})
+	}
+
+	return out
+}
+
+func withContextPathPrefix(rawPath string, ctxID string) string {
+	if strings.TrimSpace(ctxID) == "" {
+		return rawPath
+	}
+
+	if strings.TrimSpace(rawPath) == "" {
+		return rawPath
+	}
+	if !strings.HasPrefix(rawPath, "/") || strings.HasPrefix(rawPath, "//") {
+		return rawPath
+	}
+
+	if strings.HasPrefix(rawPath, "/x/") {
+		return rawPath
+	}
+
+	return ensureContextPathPrefix(rawPath, ctxID)
+}
+
+func rewriteShareLocation(rawLocation string, ctxID string, requestHost string) (string, bool) {
+	if strings.TrimSpace(ctxID) == "" {
+		return "", false
+	}
+
 	parsed, err := url.Parse(rawLocation)
 	if err != nil {
 		return "", false
@@ -1604,30 +2378,13 @@ func rewriteShareLocation(rawLocation string, shareToken string, requestHost str
 			return "", false
 		}
 
-		parsed.Path = ensureSharePathPrefix(parsed.Path, shareToken)
+		parsed.Path = ensureContextPathPrefix(parsed.Path, ctxID)
 		return parsed.String(), true
 	}
 
 	if strings.HasPrefix(rawLocation, "/") {
-		return ensureSharePathPrefix(rawLocation, shareToken), true
+		return ensureContextPathPrefix(rawLocation, ctxID), true
 	}
 
 	return "", false
-}
-
-func ensureSharePathPrefix(path string, shareToken string) string {
-	prefix := "/s/" + shareToken
-	if strings.HasPrefix(path, prefix) {
-		return path
-	}
-
-	if path == "" || path == "/" {
-		return prefix + "/"
-	}
-
-	if strings.HasPrefix(path, "/") {
-		return prefix + path
-	}
-
-	return prefix + "/" + path
 }

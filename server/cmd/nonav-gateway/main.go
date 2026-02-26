@@ -77,6 +77,10 @@ func ensureEnvFile(path string, content string) bool {
 const gatewayEnvTemplate = `NONAV_GATEWAY_LISTEN_ADDR=:8080
 NONAV_API_BASE_URL=http://127.0.0.1:18081
 NONAV_PUBLIC_BASE_URL=https://node.example.com
+NONAV_SHARE_SUBDOMAIN_ENABLED=false
+NONAV_SHARE_SUBDOMAIN_BASE=node.example.com
+NONAV_LOG_LEVEL=info
+NONAV_LOG_ROUTE_TRACE=true
 
 NONAV_FORCE_FRP=true
 NONAV_FRP_UPSTREAM_URL=http://127.0.0.1:13000
