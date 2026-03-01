@@ -238,7 +238,8 @@ const copyShareLink = async (share: Share) => {
   try {
     await navigator.clipboard.writeText(share.shareUrl)
     showAlert('链接已复制')
-  } catch {
+  } catch (error) {
+    console.error('复制分享链接失败:', error)
     showAlert('复制失败，请手动复制', 'error')
   }
 }
