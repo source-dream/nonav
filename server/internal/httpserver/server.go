@@ -397,9 +397,19 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		siteURLByID := make(map[int64]string)
+		sites, err := s.store.ListSites(r.Context())
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, site := range sites {
+			siteURLByID[site.ID] = site.URL
+		}
+
 		items := make([]map[string]any, 0, len(shares))
 		for _, share := range shares {
-			shareURL := s.buildShareURL(share)
+			shareURL := s.buildShareURLWithSourceURL(share, siteURLByID[share.SiteID])
 			items = append(items, map[string]any{
 				"id":            share.ID,
 				"siteId":        share.SiteID,
@@ -593,7 +603,7 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 
 		respondJSON(w, http.StatusCreated, core.ShareWithPassword{
 			Share:         created,
-			ShareURL:      s.buildShareURL(created),
+			ShareURL:      s.buildShareURLWithSourceURL(created, site.URL),
 			PlainPassword: password,
 		})
 	default:
@@ -1277,19 +1287,49 @@ func isSubdomainConflictError(err error) bool {
 }
 
 func (s *Server) buildShareURL(share core.Share) string {
+	return s.buildShareURLWithSourceURL(share, "")
+}
+
+func (s *Server) buildShareURLWithSourceURL(share core.Share, sourceURL string) string {
 	baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
+	targetPath, targetRawQuery := extractURLPathAndQuery(share.TargetURL)
+	if strings.TrimSpace(sourceURL) != "" {
+		targetPath, targetRawQuery = extractURLPathAndQuery(sourceURL)
+	}
 	mode := strings.TrimSpace(share.ShareMode)
 	if mode == "" {
 		mode = "path_ctx"
 	}
 
 	if mode == "subdomain" && s.cfg.ShareSubdomainOn {
-		if absolute := s.buildSubdomainURL(share, "/", ""); absolute != "" {
+		if absolute := s.buildSubdomainURL(share, targetPath, targetRawQuery); absolute != "" {
 			return absolute
 		}
 	}
 
-	return fmt.Sprintf("%s/s/%s", baseURL, share.Token)
+	shareURL := fmt.Sprintf("%s/s/%s", baseURL, share.Token)
+	if targetPath != "/" {
+		shareURL += targetPath
+	}
+	if targetRawQuery != "" {
+		shareURL += "?" + targetRawQuery
+	}
+
+	return shareURL
+}
+
+func extractURLPathAndQuery(raw string) (string, string) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "/", ""
+	}
+
+	path := parsed.EscapedPath()
+	if strings.TrimSpace(path) == "" {
+		path = "/"
+	}
+
+	return path, parsed.RawQuery
 }
 
 func (s *Server) buildSubdomainURL(share core.Share, path string, rawQuery string) string {
@@ -1305,7 +1345,16 @@ func (s *Server) buildSubdomainURL(share core.Share, path string, rawQuery strin
 		return ""
 	}
 
-	parsed.Host = slug + "." + baseDomain
+	port := ""
+	if parsedPort, ok := extractPortFromHost(parsed.Host); ok {
+		port = parsedPort
+	}
+
+	host := slug + "." + baseDomain
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	parsed.Host = host
 	if parsed.Scheme == "" {
 		parsed.Scheme = "https"
 	}
@@ -1318,6 +1367,28 @@ func (s *Server) buildSubdomainURL(share core.Share, path string, rawQuery strin
 	parsed.Fragment = ""
 
 	return parsed.String()
+}
+
+func extractPortFromHost(host string) (string, bool) {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return "", false
+	}
+
+	if !strings.Contains(trimmed, ":") {
+		return "", false
+	}
+
+	_, port, err := net.SplitHostPort(trimmed)
+	if err != nil {
+		return "", false
+	}
+
+	if strings.TrimSpace(port) == "" {
+		return "", false
+	}
+
+	return port, true
 }
 
 func extractShareSubdomainSlug(hostWithPort string, baseDomain string) (string, bool) {

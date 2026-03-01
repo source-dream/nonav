@@ -133,6 +133,8 @@ go run ./cmd/nonav-gateway
 - `path_ctx`（默认）：链接为 `/s/<token>`，访问后网关会跳转到 `/x/<ctx-id>/...` 隔离上下文。
 - `subdomain`：链接为 `https://<slug>.<base-domain>/`，需开启 `NONAV_SHARE_SUBDOMAIN_ENABLED=true` 并配置 `NONAV_SHARE_SUBDOMAIN_BASE`。若不填写 `slug`，系统会自动生成 10 位随机前缀。
 
+本地调试建议使用 `lvh.me`（自动解析到 `127.0.0.1`）：例如设置 `NONAV_PUBLIC_BASE_URL=http://lvh.me:8080`、`NONAV_SHARE_SUBDOMAIN_BASE=lvh.me`，即可通过 `http://<slug>.lvh.me:8080` 访问分享。
+
 排障提示：
 
 - 网关每个请求会返回 `X-Nonav-Gateway-Rev`、`X-Nonav-Req-Id`。
