@@ -5,12 +5,14 @@ import SharePanel from './components/SharePanel.vue'
 import SiteSettingsDrawer from './components/SiteSettingsDrawer.vue'
 import SiteGrid from './components/SiteGrid.vue'
 import { useApi } from './composables/useApi'
-import type { CreateSharePayload, Share, Site } from './types'
+import type { CreateSharePayload, Share, Site, SiteStatus } from './types'
 
 const api = useApi()
+const appVersion = import.meta.env.DEV ? 'v0.0.0' : __APP_VERSION__
 
 const sites = ref<Site[]>([])
 const shares = ref<Share[]>([])
+const siteStatuses = ref<Record<number, SiteStatus>>({})
 const theme = ref<'light' | 'dark'>('light')
 const loading = ref(false)
 const savingSite = ref(false)
@@ -91,10 +93,56 @@ const loadData = async () => {
     const [siteList, shareList] = await Promise.all([api.listSites(), api.listShares()])
     sites.value = siteList
     shares.value = shareList
+    primeSiteStatuses(siteList)
+    void refreshSiteStatuses(siteList)
   } catch (error) {
     showAlert(error instanceof Error ? error.message : '加载数据失败', 'error')
   } finally {
     loading.value = false
+  }
+}
+
+const primeSiteStatuses = (siteList: Site[]) => {
+  const next: Record<number, SiteStatus> = {}
+  for (const site of siteList) {
+    next[site.id] = site.checkEnabled ? 'checking' : 'disabled'
+  }
+  siteStatuses.value = next
+}
+
+const refreshSiteStatuses = async (siteList: Site[]) => {
+  const next = { ...siteStatuses.value }
+  const enabledIds: number[] = []
+
+  for (const site of siteList) {
+    if (!site.checkEnabled) {
+      next[site.id] = 'disabled'
+      continue
+    }
+
+    next[site.id] = 'checking'
+    enabledIds.push(site.id)
+  }
+
+  siteStatuses.value = next
+
+  if (enabledIds.length === 0) {
+    return
+  }
+
+  try {
+    const statuses = await api.checkSiteStatuses(enabledIds)
+    const merged = { ...siteStatuses.value }
+    for (const item of statuses) {
+      merged[item.siteId] = item.status
+    }
+    siteStatuses.value = merged
+  } catch {
+    const failed = { ...siteStatuses.value }
+    for (const siteID of enabledIds) {
+      failed[siteID] = 'offline'
+    }
+    siteStatuses.value = failed
   }
 }
 
@@ -153,6 +201,7 @@ const addSite = async (payload: { name: string; url: string; groupName: string }
   try {
     const created = await api.createSite(payload)
     sites.value = [created, ...sites.value]
+    void refreshSiteStatuses([created])
     showAlert('网站已添加')
     showAddForm.value = false
   } catch (error) {
@@ -182,11 +231,12 @@ const closeSiteSettings = () => {
   showSiteSettingsDrawer.value = false
 }
 
-const saveSiteSettings = async (payload: { id: number; name: string; url: string; groupName: string }) => {
+const saveSiteSettings = async (payload: { id: number; name: string; url: string; groupName: string; checkEnabled: boolean }) => {
   savingSite.value = true
   try {
     const updated = await api.updateSite(payload)
     sites.value = sites.value.map((item) => (item.id === updated.id ? updated : item))
+    void refreshSiteStatuses([updated])
     showAlert('网站配置已更新')
   } catch (error) {
     showAlert(error instanceof Error ? error.message : '保存配置失败', 'error')
@@ -200,6 +250,9 @@ const deleteSiteFromSettings = async (site: Site) => {
     await api.deleteSite(site.id)
     sites.value = sites.value.filter((item) => item.id !== site.id)
     shares.value = shares.value.filter((item) => item.siteId !== site.id)
+    const nextStatuses = { ...siteStatuses.value }
+    delete nextStatuses[site.id]
+    siteStatuses.value = nextStatuses
     showAlert(`已删除 ${site.name}`)
     closeSiteSettings()
   } catch (error) {
@@ -283,7 +336,10 @@ onUnmounted(() => {
   <main class="page">
     <header class="topbar">
       <div class="brand">
-        <h1>内网导航</h1>
+        <div class="brand-title-wrap">
+          <h1>内网导航</h1>
+          <span class="brand-version">{{ appVersion }}</span>
+        </div>
       </div>
       <div class="toolbar">
         <input v-model="searchQuery" class="search-input" type="search" placeholder="搜索站点名称、URL、分组" />
@@ -357,6 +413,7 @@ onUnmounted(() => {
         v-else
         :sites="filteredSites"
         :share-lookup="shareLookup"
+        :site-statuses="siteStatuses"
         @open="openSite"
         @open-settings="openSiteSettings"
       />
@@ -410,10 +467,26 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.brand-title-wrap {
+  position: relative;
+  display: inline-flex;
+  padding-right: 52px;
+}
+
 h1 {
   margin: 0;
   font-size: clamp(30px, 5vw, 44px);
   letter-spacing: -0.02em;
+}
+
+.brand-version {
+  position: absolute;
+  right: 0;
+  bottom: 5px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 0.02em;
 }
 
 .toolbar {

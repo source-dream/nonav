@@ -3,10 +3,19 @@ export interface Site {
   name: string
   url: string
   groupName: string
+  checkEnabled: boolean
   icon: string
   clickCount: number
   createdAt: string
   updatedAt: string
+}
+
+export type SiteStatus = 'checking' | 'online' | 'offline' | 'disabled'
+
+export interface SiteStatusResult {
+  siteId: number
+  status: Exclude<SiteStatus, 'checking'>
+  checkedAt: string
 }
 
 export interface Share {
@@ -47,6 +56,7 @@ export interface SiteUpdatePayload {
   name: string
   url: string
   groupName: string
+  checkEnabled: boolean
 }
 
 export interface CreateSharePayload {

@@ -12,7 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  saveSite: [payload: { id: number; name: string; url: string; groupName: string }]
+  saveSite: [payload: { id: number; name: string; url: string; groupName: string; checkEnabled: boolean }]
   startShare: [payload: { siteId: number; expiresInHours?: number; password?: string; shareMode?: 'path_ctx' | 'subdomain'; subdomainSlug?: string }]
   stopShare: [share: Share]
   copyShare: [share: Share]
@@ -23,6 +23,7 @@ const siteForm = reactive({
   name: '',
   url: '',
   groupName: '',
+  checkEnabled: true,
 })
 
 const shareForm = reactive({
@@ -40,6 +41,7 @@ watch(
     siteForm.name = site?.name ?? ''
     siteForm.url = site?.url ?? ''
     siteForm.groupName = site?.groupName ?? ''
+    siteForm.checkEnabled = site?.checkEnabled ?? true
     shareForm.expiresInHours = ''
     shareForm.password = ''
     shareForm.shareMode = 'path_ctx'
@@ -66,6 +68,7 @@ const submitSite = () => {
     name: siteForm.name.trim(),
     url: siteForm.url.trim(),
     groupName: siteForm.groupName.trim(),
+    checkEnabled: siteForm.checkEnabled,
   })
 }
 
@@ -117,6 +120,13 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString()
             <label class="field field-full">
               <span>URL</span>
               <input v-model="siteForm.url" type="url" placeholder="https://intranet.example.local" />
+            </label>
+            <label class="field field-full switch-field">
+              <span>检测状态</span>
+              <span class="switch-row">
+                <input v-model="siteForm.checkEnabled" class="switch-input" type="checkbox" />
+                <span>{{ siteForm.checkEnabled ? '开启' : '关闭' }}</span>
+              </span>
             </label>
           </div>
           <div class="actions-row">
@@ -230,8 +240,11 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString()
 .field-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field { display: grid; gap: 6px; }
 .field span { color: var(--text-secondary); font-size: 12px; }
-.field input { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-solid); color: var(--text-main); font: inherit; padding: 9px 10px; }
+.field input:not(.switch-input) { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-solid); color: var(--text-main); font: inherit; padding: 9px 10px; }
 .field-full { grid-column: 1 / -1; }
+.switch-field { align-content: start; }
+.switch-row { display: inline-flex; align-items: center; gap: 10px; color: var(--text-main); font-size: 13px; }
+.switch-input { width: 16px; height: 16px; accent-color: var(--accent-main); }
 .mode-segment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .mode-chip {
   border: 1px solid var(--line-soft);

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import type { Site } from '../types'
+import type { Site, SiteStatus } from '../types'
 
 defineProps<{
   site: Site
+  siteStatus: SiteStatus
   shareInfo?: {
     active: boolean
     total: number
@@ -24,7 +25,10 @@ const handleContext = (event: MouseEvent, site: Site) => {
   <article class="site-card" @click="emit('open', site)" @contextmenu="handleContext($event, site)">
     <div class="site-card-top">
       <h3 class="site-title">{{ site.name }}</h3>
-      <span class="site-group">{{ site.groupName || '未分组' }}</span>
+      <span class="site-group-wrap">
+        <span class="site-status-dot" :class="`site-status-dot-${siteStatus}`" />
+        <span class="site-group">{{ site.groupName || '未分组' }}</span>
+      </span>
     </div>
     <p class="site-url">{{ site.url }}</p>
     <footer class="site-meta">
@@ -67,6 +71,36 @@ const handleContext = (event: MouseEvent, site: Site) => {
   border-radius: 999px;
   background: var(--surface-tint);
   padding: 4px 8px;
+}
+
+.site-group-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.site-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: #8d99a8;
+}
+
+.site-status-dot-checking {
+  background: #d7a500;
+}
+
+.site-status-dot-online {
+  background: #2aa84a;
+}
+
+.site-status-dot-offline {
+  background: #d24646;
+}
+
+.site-status-dot-disabled {
+  background: #9aa3af;
 }
 
 .site-title {

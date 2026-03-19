@@ -1,4 +1,4 @@
-import type { CreateSharePayload, Share, ShareCreatedResult, Site, SiteUpdatePayload } from '../types'
+import type { CreateSharePayload, Share, ShareCreatedResult, Site, SiteStatusResult, SiteUpdatePayload } from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -53,9 +53,18 @@ export function useApi() {
         name: input.name,
         url: input.url,
         groupName: input.groupName,
+        checkEnabled: input.checkEnabled,
         icon: '',
       }),
     })
+  }
+
+  const checkSiteStatuses = async (siteIds: number[]) => {
+    const payload = await request<{ statuses: SiteStatusResult[] }>('/api/site-statuses', {
+      method: 'POST',
+      body: JSON.stringify({ siteIds }),
+    })
+    return payload.statuses
   }
 
   const incrementSiteClick = async (siteId: number) => {
@@ -92,6 +101,7 @@ export function useApi() {
     listSites,
     createSite,
     updateSite,
+    checkSiteStatuses,
     deleteSite,
     incrementSiteClick,
     listShares,

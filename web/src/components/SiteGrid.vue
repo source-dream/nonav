@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import SiteCard from './SiteCard.vue'
-import type { Site } from '../types'
+import type { Site, SiteStatus } from '../types'
 
 defineProps<{
   sites: Site[]
   shareLookup: Record<number, { active: boolean; total: number }>
+  siteStatuses: Record<number, SiteStatus>
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +20,7 @@ const emit = defineEmits<{
       v-for="site in sites"
       :key="site.id"
       :site="site"
+      :site-status="siteStatuses[site.id] ?? (site.checkEnabled ? 'checking' : 'disabled')"
       :share-info="shareLookup[site.id]"
       @open="emit('open', $event)"
       @open-settings="emit('openSettings', $event)"

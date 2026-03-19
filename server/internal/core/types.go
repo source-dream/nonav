@@ -3,14 +3,15 @@ package core
 import "time"
 
 type Site struct {
-	ID         int64     `json:"id"`
-	Name       string    `json:"name"`
-	URL        string    `json:"url"`
-	GroupName  string    `json:"groupName"`
-	Icon       string    `json:"icon"`
-	ClickCount int64     `json:"clickCount"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
+	URL          string    `json:"url"`
+	GroupName    string    `json:"groupName"`
+	CheckEnabled bool      `json:"checkEnabled"`
+	Icon         string    `json:"icon"`
+	ClickCount   int64     `json:"clickCount"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Share struct {

@@ -33,11 +33,15 @@ type Server struct {
 	mux               *http.ServeMux
 	apiProxy          *httputil.ReverseProxy
 	apiClient         *InternalAPIClient
+	siteStatusHTTP    *http.Client
 	frontendDevProxy  *httputil.ReverseProxy
 	serveFrontend     bool
 	frpManager        *FRPProcessManager
 	frpsManager       *FRPServerProcessManager
 	siteLocks         sync.Map
+	siteStatusMu      sync.Mutex
+	siteStatusCache   map[int64]siteStatusCacheEntry
+	siteStatusRunning map[int64]*siteStatusProbe
 	shareCtxMu        sync.Mutex
 	shareCtxByID      map[string]shareProxyContext
 	shareCtxIDByToken map[string]string
@@ -45,6 +49,16 @@ type Server struct {
 
 const apiTunnelShareID int64 = -1
 const gatewayRevisionHeaderValue = "20260226-sharectx-v5"
+const siteStatusCacheTTL = 5 * time.Minute
+
+type siteStatusCacheEntry struct {
+	Status    string
+	CheckedAt time.Time
+}
+
+type siteStatusProbe struct {
+	done chan struct{}
+}
 
 type shareProxyContext struct {
 	ID          string
@@ -55,11 +69,14 @@ type shareProxyContext struct {
 
 func NewAPI(cfg config.Config, st *store.SQLiteStore) (*Server, error) {
 	s := &Server{
-		cfg:           cfg,
-		store:         st,
-		mux:           http.NewServeMux(),
-		serveFrontend: true,
-		frpManager:    NewFRPProcessManager(cfg),
+		cfg:               cfg,
+		store:             st,
+		mux:               http.NewServeMux(),
+		siteStatusHTTP:    &http.Client{Timeout: 6 * time.Second},
+		serveFrontend:     true,
+		frpManager:        NewFRPProcessManager(cfg),
+		siteStatusCache:   make(map[int64]siteStatusCacheEntry),
+		siteStatusRunning: make(map[int64]*siteStatusProbe),
 	}
 
 	s.routesAPI()
@@ -89,9 +106,12 @@ func NewGateway(cfg config.Config) (*Server, error) {
 		mux:               http.NewServeMux(),
 		apiProxy:          httputil.NewSingleHostReverseProxy(apiURL),
 		apiClient:         NewInternalAPIClient(cfg.APIBaseURL),
+		siteStatusHTTP:    &http.Client{Timeout: 6 * time.Second},
 		frontendDevProxy:  frontendProxy,
 		serveFrontend:     false,
 		frpsManager:       NewFRPServerProcessManager(cfg),
+		siteStatusCache:   make(map[int64]siteStatusCacheEntry),
+		siteStatusRunning: make(map[int64]*siteStatusProbe),
 		shareCtxByID:      make(map[string]shareProxyContext),
 		shareCtxIDByToken: make(map[string]string),
 	}
@@ -211,6 +231,7 @@ func (s *Server) routesAPI() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/api/sites", s.withCORS(s.handleSites))
 	s.mux.HandleFunc("/api/sites/", s.withCORS(s.handleSiteActions))
+	s.mux.HandleFunc("/api/site-statuses", s.withCORS(s.handleSiteStatuses))
 	s.mux.HandleFunc("/api/shares", s.withCORS(s.handleShares))
 	s.mux.HandleFunc("/api/shares/", s.withCORS(s.handleShareActions))
 	s.mux.HandleFunc("/api/internal/shares/token/", s.handleInternalShareByToken)
@@ -265,10 +286,11 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request) {
 		}
 
 		site, err := s.store.CreateSite(r.Context(), core.Site{
-			Name:      strings.TrimSpace(payload.Name),
-			URL:       strings.TrimSpace(payload.URL),
-			GroupName: strings.TrimSpace(payload.GroupName),
-			Icon:      strings.TrimSpace(payload.Icon),
+			Name:         strings.TrimSpace(payload.Name),
+			URL:          strings.TrimSpace(payload.URL),
+			GroupName:    strings.TrimSpace(payload.GroupName),
+			CheckEnabled: true,
+			Icon:         strings.TrimSpace(payload.Icon),
 		})
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
@@ -279,6 +301,98 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request) {
 	default:
 		respondMethodNotAllowed(w)
 	}
+}
+
+func (s *Server) handleSiteStatuses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondMethodNotAllowed(w)
+		return
+	}
+
+	var payload struct {
+		SiteIDs []int64 `json:"siteIds"`
+	}
+
+	if err := decodeJSON(r, &payload); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if len(payload.SiteIDs) == 0 {
+		respondJSON(w, http.StatusOK, map[string]any{"statuses": []any{}})
+		return
+	}
+
+	sites, err := s.store.ListSites(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	siteByID := make(map[int64]core.Site, len(sites))
+	for _, site := range sites {
+		siteByID[site.ID] = site
+	}
+
+	type siteStatusResponse struct {
+		SiteID    int64     `json:"siteId"`
+		Status    string    `json:"status"`
+		CheckedAt time.Time `json:"checkedAt"`
+	}
+
+	type siteStatusResult struct {
+		response siteStatusResponse
+		err      error
+	}
+
+	uniqueIDs := make([]int64, 0, len(payload.SiteIDs))
+	seen := make(map[int64]struct{}, len(payload.SiteIDs))
+	for _, siteID := range payload.SiteIDs {
+		if _, ok := seen[siteID]; ok {
+			continue
+		}
+		if _, ok := siteByID[siteID]; !ok {
+			continue
+		}
+		seen[siteID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, siteID)
+	}
+
+	results := make([]siteStatusResponse, 0, len(uniqueIDs))
+	resultCh := make(chan siteStatusResult, len(uniqueIDs))
+	var wg sync.WaitGroup
+	for _, siteID := range uniqueIDs {
+		site := siteByID[siteID]
+		wg.Add(1)
+		go func(site core.Site) {
+			defer wg.Done()
+
+			status, checkedAt, err := s.getSiteStatus(r.Context(), site)
+			if err != nil {
+				resultCh <- siteStatusResult{err: err}
+				return
+			}
+
+			resultCh <- siteStatusResult{response: siteStatusResponse{
+				SiteID:    site.ID,
+				Status:    status,
+				CheckedAt: checkedAt,
+			}}
+		}(site)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	for item := range resultCh {
+		if item.err != nil {
+			respondError(w, http.StatusInternalServerError, item.err.Error())
+			return
+		}
+		results = append(results, item.response)
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"statuses": results})
 }
 
 func (s *Server) handleSiteActions(w http.ResponseWriter, r *http.Request) {
@@ -316,10 +430,11 @@ func (s *Server) handleSiteActions(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPut {
 		var payload struct {
-			Name      string `json:"name"`
-			URL       string `json:"url"`
-			GroupName string `json:"groupName"`
-			Icon      string `json:"icon"`
+			Name         string `json:"name"`
+			URL          string `json:"url"`
+			GroupName    string `json:"groupName"`
+			CheckEnabled bool   `json:"checkEnabled"`
+			Icon         string `json:"icon"`
 		}
 
 		if err := decodeJSON(r, &payload); err != nil {
@@ -338,11 +453,12 @@ func (s *Server) handleSiteActions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		updated, err := s.store.UpdateSite(r.Context(), core.Site{
-			ID:        siteID,
-			Name:      strings.TrimSpace(payload.Name),
-			URL:       strings.TrimSpace(payload.URL),
-			GroupName: strings.TrimSpace(payload.GroupName),
-			Icon:      strings.TrimSpace(payload.Icon),
+			ID:           siteID,
+			Name:         strings.TrimSpace(payload.Name),
+			URL:          strings.TrimSpace(payload.URL),
+			GroupName:    strings.TrimSpace(payload.GroupName),
+			CheckEnabled: payload.CheckEnabled,
+			Icon:         strings.TrimSpace(payload.Icon),
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -2053,6 +2169,89 @@ func (s *Server) lockSite(siteID int64) func() {
 	return func() {
 		mu.Unlock()
 	}
+}
+
+func (s *Server) getSiteStatus(ctx context.Context, site core.Site) (string, time.Time, error) {
+	if !site.CheckEnabled {
+		s.siteStatusMu.Lock()
+		delete(s.siteStatusCache, site.ID)
+		s.siteStatusMu.Unlock()
+		return "disabled", time.Time{}, nil
+	}
+
+	for {
+		now := time.Now().UTC()
+
+		s.siteStatusMu.Lock()
+		if cached, ok := s.siteStatusCache[site.ID]; ok && now.Sub(cached.CheckedAt) < siteStatusCacheTTL {
+			s.siteStatusMu.Unlock()
+			return cached.Status, cached.CheckedAt, nil
+		}
+
+		if probe, ok := s.siteStatusRunning[site.ID]; ok {
+			done := probe.done
+			s.siteStatusMu.Unlock()
+
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return "", time.Time{}, ctx.Err()
+			}
+		}
+
+		probe := &siteStatusProbe{done: make(chan struct{})}
+		s.siteStatusRunning[site.ID] = probe
+		s.siteStatusMu.Unlock()
+
+		status, checkedAt := s.detectSiteStatus(ctx, site)
+
+		s.siteStatusMu.Lock()
+		s.siteStatusCache[site.ID] = siteStatusCacheEntry{
+			Status:    status,
+			CheckedAt: checkedAt,
+		}
+		delete(s.siteStatusRunning, site.ID)
+		close(probe.done)
+		s.siteStatusMu.Unlock()
+
+		return status, checkedAt, nil
+	}
+}
+
+func (s *Server) detectSiteStatus(ctx context.Context, site core.Site) (string, time.Time) {
+	checkedAt := time.Now().UTC()
+
+	methods := []string{http.MethodHead, http.MethodGet}
+	for index, method := range methods {
+		req, err := http.NewRequestWithContext(ctx, method, site.URL, nil)
+		if err != nil {
+			return "offline", checkedAt
+		}
+
+		resp, err := s.siteStatusHTTP.Do(req)
+		if err != nil {
+			if index == 0 {
+				continue
+			}
+			return "offline", checkedAt
+		}
+
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if method == http.MethodHead && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusBadRequest) {
+			continue
+		}
+
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+			return "online", checkedAt
+		}
+
+		return "offline", checkedAt
+	}
+
+	return "offline", checkedAt
 }
 
 func (s *Server) createOrGetShareContext(share core.Share, hasPassword bool) (string, error) {

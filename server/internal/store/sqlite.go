@@ -87,6 +87,7 @@ func (s *SQLiteStore) migrate() error {
 			name TEXT NOT NULL,
 			url TEXT NOT NULL,
 			group_name TEXT NOT NULL DEFAULT '',
+			check_enabled INTEGER NOT NULL DEFAULT 1,
 			icon TEXT NOT NULL DEFAULT '',
 			click_count INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
@@ -132,6 +133,10 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if err := s.ensureSiteColumn("check_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+
 	if err := s.ensureShareColumn("frp_remote_port", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -146,6 +151,38 @@ func (s *SQLiteStore) migrate() error {
 
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_subdomain_slug ON shares(subdomain_slug) WHERE subdomain_slug IS NOT NULL AND subdomain_slug <> ''`); err != nil {
 		return fmt.Errorf("create shares subdomain index: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) ensureSiteColumn(name string, columnDef string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(sites);`)
+	if err != nil {
+		return fmt.Errorf("query sites table info: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid      int
+			colName  string
+			colType  string
+			notNull  int
+			defaultV sql.NullString
+			primaryK int
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultV, &primaryK); err != nil {
+			return fmt.Errorf("scan sites table info: %w", err)
+		}
+
+		if colName == name {
+			return nil
+		}
+	}
+
+	if _, err := s.db.Exec(`ALTER TABLE sites ADD COLUMN ` + name + ` ` + columnDef); err != nil {
+		return fmt.Errorf("alter sites add %s: %w", name, err)
 	}
 
 	return nil
@@ -201,7 +238,7 @@ func (s *SQLiteStore) setupPragmas() error {
 
 func (s *SQLiteStore) ListSites(ctx context.Context) ([]core.Site, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, group_name, icon, click_count, created_at, updated_at
+		SELECT id, name, url, group_name, check_enabled, icon, click_count, created_at, updated_at
 		FROM sites
 		ORDER BY updated_at DESC
 	`)
@@ -218,6 +255,7 @@ func (s *SQLiteStore) ListSites(ctx context.Context) ([]core.Site, error) {
 			&site.Name,
 			&site.URL,
 			&site.GroupName,
+			&site.CheckEnabled,
 			&site.Icon,
 			&site.ClickCount,
 			&site.CreatedAt,
@@ -235,9 +273,9 @@ func (s *SQLiteStore) ListSites(ctx context.Context) ([]core.Site, error) {
 func (s *SQLiteStore) CreateSite(ctx context.Context, site core.Site) (core.Site, error) {
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO sites(name, url, group_name, icon, click_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, ?, ?)
-	`, site.Name, site.URL, site.GroupName, site.Icon, now, now)
+		INSERT INTO sites(name, url, group_name, check_enabled, icon, click_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+	`, site.Name, site.URL, site.GroupName, site.CheckEnabled, site.Icon, now, now)
 	if err != nil {
 		return core.Site{}, fmt.Errorf("create site: %w", err)
 	}
@@ -259,9 +297,9 @@ func (s *SQLiteStore) UpdateSite(ctx context.Context, site core.Site) (core.Site
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE sites
-		SET name = ?, url = ?, group_name = ?, icon = ?, updated_at = ?
+		SET name = ?, url = ?, group_name = ?, check_enabled = ?, icon = ?, updated_at = ?
 		WHERE id = ?
-	`, site.Name, site.URL, site.GroupName, site.Icon, now, site.ID)
+	`, site.Name, site.URL, site.GroupName, site.CheckEnabled, site.Icon, now, site.ID)
 	if err != nil {
 		return core.Site{}, fmt.Errorf("update site: %w", err)
 	}
@@ -326,7 +364,7 @@ func (s *SQLiteStore) IncrementSiteClick(ctx context.Context, siteID int64) erro
 func (s *SQLiteStore) GetSiteByID(ctx context.Context, siteID int64) (core.Site, error) {
 	var site core.Site
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, url, group_name, icon, click_count, created_at, updated_at
+		SELECT id, name, url, group_name, check_enabled, icon, click_count, created_at, updated_at
 		FROM sites
 		WHERE id = ?
 	`, siteID).Scan(
@@ -334,6 +372,7 @@ func (s *SQLiteStore) GetSiteByID(ctx context.Context, siteID int64) (core.Site,
 		&site.Name,
 		&site.URL,
 		&site.GroupName,
+		&site.CheckEnabled,
 		&site.Icon,
 		&site.ClickCount,
 		&site.CreatedAt,
