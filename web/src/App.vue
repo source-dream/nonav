@@ -490,6 +490,14 @@ onUnmounted(() => {
   margin: 20px auto 48px;
   display: grid;
   gap: 18px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.page :deep(input),
+.page :deep(textarea) {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .topbar {
