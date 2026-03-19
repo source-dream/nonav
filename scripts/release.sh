@@ -46,7 +46,7 @@ rm -f "$DIST_DIR/nonav-${VERSION}-linux-amd64" "$DIST_DIR/nonav-gateway-${VERSIO
 
 echo "[release] version: $VERSION"
 echo "[release] building release artifacts..."
-make -C "$ROOT_DIR" build
+APP_VERSION="$VERSION" make -C "$ROOT_DIR" build
 
 cp "$BIN_DIR/nonav" "$DIST_DIR/nonav-${VERSION}-linux-amd64"
 cp "$BIN_DIR/nonav-gateway" "$DIST_DIR/nonav-gateway-${VERSION}-linux-amd64"

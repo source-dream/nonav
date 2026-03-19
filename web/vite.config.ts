@@ -2,10 +2,12 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import packageJSON from './package.json'
 
+const resolvedVersion = process.env.APP_VERSION?.trim() || `v${packageJSON.version}`
+
 export default defineConfig({
   plugins: [vue()],
   define: {
-    __APP_VERSION__: JSON.stringify(`v${packageJSON.version}`),
+    __APP_VERSION__: JSON.stringify(resolvedVersion),
   },
   server: {
     host: '127.0.0.1',
