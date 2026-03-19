@@ -513,9 +513,10 @@ onUnmounted(() => {
 }
 
 .brand-title-wrap {
-  position: relative;
   display: inline-flex;
-  padding-right: 52px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 h1 {
@@ -525,13 +526,11 @@ h1 {
 }
 
 .brand-version {
-  position: absolute;
-  right: 0;
-  bottom: 5px;
   color: var(--text-tertiary);
   font-size: 14px;
   line-height: 1;
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .toolbar {
