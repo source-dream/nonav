@@ -2244,7 +2244,7 @@ func (s *Server) detectSiteStatus(ctx context.Context, site core.Site) (string, 
 			continue
 		}
 
-		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+		if resp.StatusCode >= http.StatusContinue && resp.StatusCode < http.StatusInternalServerError {
 			return "online", checkedAt
 		}
 
