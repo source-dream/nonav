@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AddSiteForm from './components/AddSiteForm.vue'
+import AppSettingsModal from './components/AppSettingsModal.vue'
+import GatewayStatusModal from './components/GatewayStatusModal.vue'
 import SharePanel from './components/SharePanel.vue'
 import SiteSettingsDrawer from './components/SiteSettingsDrawer.vue'
 import SiteGrid from './components/SiteGrid.vue'
 import { useApi } from './composables/useApi'
-import type { CreateSharePayload, Share, Site, SiteStatus } from './types'
+import type { CreateSharePayload, GatewayStatusSnapshot, Share, Site, SiteStatus, SystemLogEntry } from './types'
 
 const api = useApi()
 const appVersion = import.meta.env.DEV ? 'v0.0.0' : __APP_VERSION__
@@ -21,11 +23,34 @@ const alertMessage = ref('')
 const searchQuery = ref('')
 const selectedGroup = ref('全部')
 const showAddForm = ref(false)
+const showSettingsModal = ref(false)
+const showGatewayStatusModal = ref(false)
 const showShareDrawer = ref(false)
 const showSiteSettingsDrawer = ref(false)
 const settingsSiteId = ref<number | null>(null)
 const alertTimer = ref<number | undefined>(undefined)
 const alertKind = ref<'success' | 'error'>('success')
+
+const gatewayStatusSnapshot = ref<GatewayStatusSnapshot>({
+  health: 'online',
+  services: [],
+})
+const systemRecentLogs = ref<SystemLogEntry[]>([])
+const systemPanelLoading = ref(false)
+const systemPanelError = ref('')
+const systemPanelTimer = ref<number | undefined>(undefined)
+
+const gatewayHealthLabel = computed(() => {
+  if (gatewayStatusSnapshot.value.health === 'degraded') {
+    return '降级'
+  }
+
+  if (gatewayStatusSnapshot.value.health === 'offline') {
+    return '离线'
+  }
+
+  return '在线'
+})
 
 const groupedOptions = computed(() => {
   const groups = new Set<string>()
@@ -342,6 +367,26 @@ const loadShares = async () => {
   }
 }
 
+const loadSystemPanel = async () => {
+  systemPanelLoading.value = true
+  systemPanelError.value = ''
+
+  try {
+    const [snapshot, logs] = await Promise.all([api.getSystemStatus(), api.getSystemLogs()])
+    gatewayStatusSnapshot.value = snapshot
+    systemRecentLogs.value = logs
+  } catch (error) {
+    systemPanelError.value = error instanceof Error ? error.message : '加载系统状态失败'
+  } finally {
+    systemPanelLoading.value = false
+  }
+}
+
+const clearSystemPanelTimer = () => {
+  window.clearInterval(systemPanelTimer.value)
+  systemPanelTimer.value = undefined
+}
+
 const clearAlert = () => {
   if (!alertMessage.value) {
     return
@@ -358,14 +403,29 @@ onMounted(() => {
   applyTheme(cachedTheme === 'dark' ? 'dark' : 'light')
 
   void loadData()
+  void loadSystemPanel()
 })
 
 watch(alertMessage, () => {
   clearAlert()
 })
 
+watch(showGatewayStatusModal, (visible) => {
+  clearSystemPanelTimer()
+
+  if (!visible) {
+    return
+  }
+
+  void loadSystemPanel()
+  systemPanelTimer.value = window.setInterval(() => {
+    void loadSystemPanel()
+  }, 10000)
+})
+
 onUnmounted(() => {
   window.clearTimeout(alertTimer.value)
+  clearSystemPanelTimer()
 })
 </script>
 
@@ -380,36 +440,82 @@ onUnmounted(() => {
       </div>
       <div class="toolbar">
         <input v-model="searchQuery" class="search-input" type="search" placeholder="搜索站点名称、URL、分组" />
-        <button class="button-subtle" type="button" @click="showAddForm = true">添加网站</button>
-        <button class="button-subtle" type="button" @click="showShareDrawer = true">分享列表</button>
-        <button
-          class="button-subtle button-theme"
-          type="button"
-          :aria-label="theme === 'light' ? '切换夜间模式' : '切换日间模式'"
-          @click="toggleTheme($event)"
-        >
-          <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <g class="theme-icon-sun" :class="{ 'theme-icon-hidden': theme !== 'light' }">
-              <circle cx="12" cy="12" r="4.2" fill="currentColor" />
-              <g stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-                <line x1="12" y1="2.4" x2="12" y2="5" />
-                <line x1="12" y1="19" x2="12" y2="21.6" />
-                <line x1="2.4" y1="12" x2="5" y2="12" />
-                <line x1="19" y1="12" x2="21.6" y2="12" />
-                <line x1="5.2" y1="5.2" x2="7.1" y2="7.1" />
-                <line x1="16.9" y1="16.9" x2="18.8" y2="18.8" />
-                <line x1="16.9" y1="7.1" x2="18.8" y2="5.2" />
-                <line x1="5.2" y1="18.8" x2="7.1" y2="16.9" />
+        <div class="toolbar-actions">
+          <button class="button-subtle" type="button" @click="showAddForm = true">添加网站</button>
+          <button class="button-subtle" type="button" @click="showShareDrawer = true">分享列表</button>
+        </div>
+        <div class="toolbar-icons">
+          <button
+            class="button-subtle button-icon button-theme"
+            type="button"
+            :aria-label="theme === 'light' ? '切换夜间模式' : '切换日间模式'"
+            :title="theme === 'light' ? '切换夜间模式' : '切换日间模式'"
+            @click="toggleTheme($event)"
+          >
+            <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <g class="theme-icon-sun" :class="{ 'theme-icon-hidden': theme !== 'light' }">
+                <circle cx="12" cy="12" r="4.2" fill="currentColor" />
+                <g stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <line x1="12" y1="2.4" x2="12" y2="5" />
+                  <line x1="12" y1="19" x2="12" y2="21.6" />
+                  <line x1="2.4" y1="12" x2="5" y2="12" />
+                  <line x1="19" y1="12" x2="21.6" y2="12" />
+                  <line x1="5.2" y1="5.2" x2="7.1" y2="7.1" />
+                  <line x1="16.9" y1="16.9" x2="18.8" y2="18.8" />
+                  <line x1="16.9" y1="7.1" x2="18.8" y2="5.2" />
+                  <line x1="5.2" y1="18.8" x2="7.1" y2="16.9" />
+                </g>
               </g>
-            </g>
-            <g class="theme-icon-moon" :class="{ 'theme-icon-hidden': theme !== 'dark' }">
+              <g class="theme-icon-moon" :class="{ 'theme-icon-hidden': theme !== 'dark' }">
+                <path
+                  d="M15.7 3.6a7.9 7.9 0 1 0 4.7 13.8A8.8 8.8 0 0 1 15.7 3.6Z"
+                  fill="currentColor"
+                />
+              </g>
+            </svg>
+          </button>
+          <button
+            class="button-subtle button-icon"
+            type="button"
+            aria-label="打开设置"
+            title="设置"
+            @click="showSettingsModal = true"
+          >
+            <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path
-                d="M15.7 3.6a7.9 7.9 0 1 0 4.7 13.8A8.8 8.8 0 0 1 15.7 3.6Z"
+                d="M10.7 2.8h2.6l.5 2.1a7.6 7.6 0 0 1 1.8.7l1.9-1.1 1.8 1.8-1.1 1.9c.3.6.6 1.2.7 1.8l2.1.5v2.6l-2.1.5a7.6 7.6 0 0 1-.7 1.8l1.1 1.9-1.8 1.8-1.9-1.1a7.6 7.6 0 0 1-1.8.7l-.5 2.1h-2.6l-.5-2.1a7.6 7.6 0 0 1-1.8-.7l-1.9 1.1-1.8-1.8 1.1-1.9a7.6 7.6 0 0 1-.7-1.8l-2.1-.5v-2.6l2.1-.5c.1-.6.4-1.2.7-1.8l-1.1-1.9 1.8-1.8 1.9 1.1c.6-.3 1.2-.6 1.8-.7zm1.3 6a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z"
                 fill="currentColor"
               />
-            </g>
-          </svg>
-        </button>
+            </svg>
+          </button>
+          <button
+            class="button-subtle button-icon"
+            type="button"
+            :aria-label="`打开网关状态，当前${gatewayHealthLabel}`"
+            :title="`网关状态：${gatewayHealthLabel}`"
+            @click="showGatewayStatusModal = true"
+          >
+            <span class="status-button-wrap">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M4 15.5h3.4l2.2-4.5 2.9 7 2.7-5h4.8"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M5.5 6.5h13a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 16V8A1.5 1.5 0 0 1 5.5 6.5Z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                />
+              </svg>
+              <span class="status-dot" :class="`status-dot-${gatewayStatusSnapshot.health}`" />
+            </span>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -424,6 +530,17 @@ onUnmounted(() => {
         </section>
       </aside>
     </Transition>
+
+    <AppSettingsModal :visible="showSettingsModal" @close="showSettingsModal = false" />
+
+    <GatewayStatusModal
+      :visible="showGatewayStatusModal"
+      :snapshot="gatewayStatusSnapshot"
+      :logs="systemRecentLogs"
+      :loading="systemPanelLoading"
+      :error="systemPanelError"
+      @close="showGatewayStatusModal = false"
+    />
 
     <Transition name="toast">
       <aside v-if="alertMessage" class="toast" :class="`toast-${alertKind}`" role="status" aria-live="polite">
@@ -541,8 +658,17 @@ h1 {
   justify-content: flex-end;
 }
 
+.toolbar-actions,
+.toolbar-icons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .search-input {
-  width: min(360px, 90vw);
+  width: min(320px, 90vw);
+  flex: 1 1 260px;
+  min-width: 220px;
   border: 1px solid var(--line-soft);
   background: var(--surface-main);
   color: var(--text-main);
@@ -560,21 +686,64 @@ h1 {
   font: inherit;
   white-space: nowrap;
   cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
 }
 
-.button-theme {
+.button-subtle:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+}
+
+.button-icon {
   width: 44px;
   display: grid;
   place-items: center;
   padding: 10px 0;
+  flex: 0 0 auto;
+}
+
+.button-theme {
   color: var(--text-main);
   line-height: 1;
   overflow: hidden;
 }
 
+.toolbar-icon,
 .theme-icon {
   width: 20px;
   height: 20px;
+}
+
+.toolbar-icon {
+  display: block;
+}
+
+.status-button-wrap {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+
+.status-dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid var(--surface-main);
+}
+
+.status-dot-online {
+  background: #2aa84a;
+}
+
+.status-dot-degraded {
+  background: #d7a500;
+}
+
+.status-dot-offline {
+  background: #d24646;
 }
 
 .theme-icon-sun,
@@ -807,6 +976,11 @@ h1 {
     justify-content: flex-start;
   }
 
+  .toolbar-actions,
+  .toolbar-icons {
+    flex-wrap: wrap;
+  }
+
   .search-input {
     flex: 1;
     min-width: 210px;
@@ -825,18 +999,34 @@ h1 {
   }
 
   .toolbar {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    flex-wrap: wrap;
     width: 100%;
+    gap: 8px;
   }
 
   .search-input {
-    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+    flex-basis: 100%;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toolbar-actions .button-subtle {
     width: 100%;
   }
 
-  .button-subtle {
-    width: 100%;
+  .toolbar-icons {
+    margin-left: auto;
+  }
+
+  .toolbar-icons .button-subtle {
+    width: 44px;
   }
 }
 </style>

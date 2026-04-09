@@ -66,3 +66,32 @@ export interface CreateSharePayload {
   shareMode?: 'path_ctx' | 'subdomain'
   subdomainSlug?: string
 }
+
+export type GatewayHealth = 'online' | 'degraded' | 'offline'
+
+export type ServiceStatusKey = 'gateway' | 'nonav' | 'frpc' | 'frps'
+
+export interface ServiceStatusItem {
+  key: ServiceStatusKey
+  label: string
+  health: GatewayHealth
+  summary: string
+}
+
+export interface GatewayStatusSnapshot {
+  health: GatewayHealth
+  services: ServiceStatusItem[]
+}
+
+export type SystemLogSource = 'nonav' | 'nonav-gateway'
+
+export interface SystemLogEntry {
+  id: number
+  source: SystemLogSource
+  timestamp: string
+  event: string
+  message: string
+  req: string
+  tone: 'normal' | 'warning' | 'error'
+  details: string[]
+}

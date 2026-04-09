@@ -17,14 +17,18 @@ import (
 type InternalAPIClient struct {
 	baseURL string
 	http    *http.Client
+	service string
+	logs    *SystemLogBuffer
 }
 
-func NewInternalAPIClient(baseURL string) *InternalAPIClient {
+func NewInternalAPIClient(baseURL string, logs *SystemLogBuffer, service string) *InternalAPIClient {
 	return &InternalAPIClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http: &http.Client{
 			Timeout: 8 * time.Second,
 		},
+		service: service,
+		logs:    logs,
 	}
 }
 
@@ -41,10 +45,12 @@ func (c *InternalAPIClient) GetShareByToken(ctx context.Context, token string) (
 	resp, err := c.http.Do(req)
 	if err != nil {
 		log.Printf("internal_api event=get_share_by_token token=%s status=error latency_ms=%d error=%v", token, time.Since(startedAt).Milliseconds(), err)
+		c.record("error", "get_share_by_token", "get share by token failed", "token="+token, fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()), fmt.Sprintf("error=%v", err))
 		return ShareInternalRecord{}, fmt.Errorf("internal api get share: %w", err)
 	}
 	defer resp.Body.Close()
 	log.Printf("internal_api event=get_share_by_token token=%s status=%d latency_ms=%d", token, resp.StatusCode, time.Since(startedAt).Milliseconds())
+	c.record(statusLevel(resp.StatusCode), "get_share_by_token", "get share by token completed", "token="+token, fmt.Sprintf("status=%d", resp.StatusCode), fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()))
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ShareInternalRecord{}, errNotFound
@@ -70,10 +76,12 @@ func (c *InternalAPIClient) GetShareBySubdomain(ctx context.Context, slug string
 	resp, err := c.http.Do(req)
 	if err != nil {
 		log.Printf("internal_api event=get_share_by_subdomain slug=%s status=error latency_ms=%d error=%v", slug, time.Since(startedAt).Milliseconds(), err)
+		c.record("error", "get_share_by_subdomain", "get share by subdomain failed", "slug="+slug, fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()), fmt.Sprintf("error=%v", err))
 		return ShareInternalRecord{}, fmt.Errorf("internal api get share by subdomain: %w", err)
 	}
 	defer resp.Body.Close()
 	log.Printf("internal_api event=get_share_by_subdomain slug=%s status=%d latency_ms=%d", slug, resp.StatusCode, time.Since(startedAt).Milliseconds())
+	c.record(statusLevel(resp.StatusCode), "get_share_by_subdomain", "get share by subdomain completed", "slug="+slug, fmt.Sprintf("status=%d", resp.StatusCode), fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()))
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ShareInternalRecord{}, errNotFound
@@ -136,10 +144,12 @@ func (c *InternalAPIClient) ValidateShareSession(ctx context.Context, token stri
 	resp, err := c.http.Do(req)
 	if err != nil {
 		log.Printf("internal_api event=validate_session token=%s status=error latency_ms=%d error=%v", token, time.Since(startedAt).Milliseconds(), err)
+		c.record("error", "validate_session", "validate share session failed", "token="+token, fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()), fmt.Sprintf("error=%v", err))
 		return false, fmt.Errorf("internal api validate session: %w", err)
 	}
 	defer resp.Body.Close()
 	log.Printf("internal_api event=validate_session token=%s status=%d latency_ms=%d", token, resp.StatusCode, time.Since(startedAt).Milliseconds())
+	c.record(statusLevel(resp.StatusCode), "validate_session", "validate share session completed", "token="+token, fmt.Sprintf("status=%d", resp.StatusCode), fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()))
 
 	if resp.StatusCode == http.StatusNotFound {
 		return false, errNotFound
@@ -175,4 +185,83 @@ func (c *InternalAPIClient) LogShareAccess(ctx context.Context, token string, me
 	if err == nil && resp != nil {
 		resp.Body.Close()
 	}
+}
+
+func (c *InternalAPIClient) GetSystemStatus(ctx context.Context) (core.SystemStatusResponse, error) {
+	endpoint := c.baseURL + "/api/internal/system/status"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	startedAt := time.Now()
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.record("error", "get_system_status", "get internal system status failed", fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()), fmt.Sprintf("error=%v", err))
+		return core.SystemStatusResponse{}, fmt.Errorf("internal api get system status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.record(statusLevel(resp.StatusCode), "get_system_status", "get internal system status completed", fmt.Sprintf("status=%d", resp.StatusCode), fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return core.SystemStatusResponse{}, fmt.Errorf("internal api get system status status %d", resp.StatusCode)
+	}
+
+	var payload core.SystemStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return core.SystemStatusResponse{}, fmt.Errorf("decode internal system status payload: %w", err)
+	}
+
+	return payload, nil
+}
+
+func (c *InternalAPIClient) GetSystemLogs(ctx context.Context, level string, limit int) ([]core.SystemLogEntry, error) {
+	params := url.Values{}
+	params.Set("source", "nonav")
+	if strings.TrimSpace(level) != "" {
+		params.Set("level", strings.TrimSpace(level))
+	}
+	if limit > 0 {
+		params.Set("limit", fmt.Sprintf("%d", limit))
+	}
+
+	endpoint := c.baseURL + "/api/internal/system/logs"
+	if encoded := params.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	startedAt := time.Now()
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.record("error", "get_system_logs", "get internal system logs failed", fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()), fmt.Sprintf("error=%v", err))
+		return nil, fmt.Errorf("internal api get system logs: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.record(statusLevel(resp.StatusCode), "get_system_logs", "get internal system logs completed", fmt.Sprintf("status=%d", resp.StatusCode), fmt.Sprintf("latency_ms=%d", time.Since(startedAt).Milliseconds()))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("internal api get system logs status %d", resp.StatusCode)
+	}
+
+	var payload core.SystemLogsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode internal system logs payload: %w", err)
+	}
+
+	return payload.Logs, nil
+}
+
+func (c *InternalAPIClient) record(level string, event string, message string, details ...string) {
+	if c == nil || c.logs == nil {
+		return
+	}
+	c.logs.Add(c.service, "internal_api", level, event, "-", message, details...)
+}
+
+func statusLevel(statusCode int) string {
+	if statusCode >= 500 {
+		return "error"
+	}
+	if statusCode >= 400 {
+		return "warn"
+	}
+	return "info"
 }

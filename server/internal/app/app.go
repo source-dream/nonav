@@ -35,7 +35,7 @@ func NewAPI(cfg config.Config) (*App, error) {
 	}
 
 	return &App{
-		name:  "api",
+		name:  "nonav",
 		store: st,
 		server: &http.Server{
 			Addr:         cfg.APIListenAddr,
@@ -57,10 +57,10 @@ func NewGateway(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	log.Printf("gateway config: public_base_url=%s api_base_url=%s subdomain_enabled=%t subdomain_base=%s log_level=%s route_trace=%t", cfg.PublicBaseURL, cfg.APIBaseURL, cfg.ShareSubdomainOn, cfg.ShareSubdomainBase, cfg.LogLevel, cfg.LogRouteTrace)
+	log.Printf("gateway config: public_base_url=%s nonav_base_url=%s subdomain_enabled=%t subdomain_base=%s log_level=%s route_trace=%t", cfg.PublicBaseURL, cfg.APIBaseURL, cfg.ShareSubdomainOn, cfg.ShareSubdomainBase, cfg.LogLevel, cfg.LogRouteTrace)
 
 	return &App{
-		name:  "gateway",
+		name:  "nonav-gateway",
 		store: nil,
 		server: &http.Server{
 			Addr:         cfg.GatewayListenAddr,
@@ -96,7 +96,7 @@ func (a *App) Run() error {
 		go a.startCleanupTicker()
 	}
 
-	log.Printf("nonav %s listening on %s", a.name, a.server.Addr)
+	log.Printf("%s listening on %s", a.name, a.server.Addr)
 	if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("listen and serve: %w", err)
 	}

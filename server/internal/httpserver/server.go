@@ -29,7 +29,9 @@ import (
 
 type Server struct {
 	cfg               config.Config
+	serviceName       string
 	store             *store.SQLiteStore
+	systemLogs        *SystemLogBuffer
 	mux               *http.ServeMux
 	apiProxy          *httputil.ReverseProxy
 	apiClient         *InternalAPIClient
@@ -70,14 +72,17 @@ type shareProxyContext struct {
 func NewAPI(cfg config.Config, st *store.SQLiteStore) (*Server, error) {
 	s := &Server{
 		cfg:               cfg,
+		serviceName:       "nonav",
 		store:             st,
+		systemLogs:        NewSystemLogBuffer(800),
 		mux:               http.NewServeMux(),
 		siteStatusHTTP:    &http.Client{Timeout: 6 * time.Second},
 		serveFrontend:     true,
-		frpManager:        NewFRPProcessManager(cfg),
+		frpManager:        NewFRPProcessManager(cfg, nil, "nonav"),
 		siteStatusCache:   make(map[int64]siteStatusCacheEntry),
 		siteStatusRunning: make(map[int64]*siteStatusProbe),
 	}
+	s.frpManager = NewFRPProcessManager(cfg, s.systemLogs, s.serviceName)
 
 	s.routesAPI()
 	return s, nil
@@ -103,17 +108,25 @@ func NewGateway(cfg config.Config) (*Server, error) {
 
 	s := &Server{
 		cfg:               cfg,
+		serviceName:       "nonav-gateway",
+		systemLogs:        NewSystemLogBuffer(800),
 		mux:               http.NewServeMux(),
 		apiProxy:          httputil.NewSingleHostReverseProxy(apiURL),
-		apiClient:         NewInternalAPIClient(cfg.APIBaseURL),
+		apiClient:         nil,
 		siteStatusHTTP:    &http.Client{Timeout: 6 * time.Second},
 		frontendDevProxy:  frontendProxy,
 		serveFrontend:     false,
-		frpsManager:       NewFRPServerProcessManager(cfg),
+		frpsManager:       nil,
 		siteStatusCache:   make(map[int64]siteStatusCacheEntry),
 		siteStatusRunning: make(map[int64]*siteStatusProbe),
 		shareCtxByID:      make(map[string]shareProxyContext),
 		shareCtxIDByToken: make(map[string]string),
+	}
+	s.apiClient = NewInternalAPIClient(cfg.APIBaseURL, s.systemLogs, s.serviceName)
+	s.frpsManager = NewFRPServerProcessManager(cfg, s.systemLogs, s.serviceName)
+	s.apiProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		s.recordSystemLog("core", "error", "api_proxy_failed", requestIDFromContext(r.Context()), "proxy to nonav failed", "path="+r.URL.Path, "error="+err.Error())
+		respondError(w, http.StatusBadGateway, "nonav unavailable")
 	}
 
 	s.routesGateway()
@@ -225,6 +238,7 @@ func (s *Server) logRoute(r *http.Request, event string, extra map[string]any) {
 	}
 
 	log.Printf("gateway_route %s", string(body))
+	s.recordSystemLog("gateway_route", "info", event, requestIDFromContext(r.Context()), "gateway route event", formatLogFields(extra)...)
 }
 
 func (s *Server) routesAPI() {
@@ -234,6 +248,8 @@ func (s *Server) routesAPI() {
 	s.mux.HandleFunc("/api/site-statuses", s.withCORS(s.handleSiteStatuses))
 	s.mux.HandleFunc("/api/shares", s.withCORS(s.handleShares))
 	s.mux.HandleFunc("/api/shares/", s.withCORS(s.handleShareActions))
+	s.mux.HandleFunc("/api/internal/system/status", s.handleInternalSystemStatus)
+	s.mux.HandleFunc("/api/internal/system/logs", s.handleInternalSystemLogs)
 	s.mux.HandleFunc("/api/internal/shares/token/", s.handleInternalShareByToken)
 	s.mux.HandleFunc("/api/internal/shares/subdomain/", s.handleInternalShareBySubdomain)
 	s.mux.HandleFunc("/", s.handleFrontend)
@@ -241,6 +257,8 @@ func (s *Server) routesAPI() {
 
 func (s *Server) routesGateway() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/api/system/status", s.handleSystemStatus)
+	s.mux.HandleFunc("/api/system/logs", s.handleSystemLogs)
 	s.mux.HandleFunc("/api/", s.handleAPIProxy)
 	s.mux.HandleFunc("/api", s.handleAPIProxy)
 	s.mux.HandleFunc("/s/", s.handleGateway)
@@ -722,6 +740,7 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			ShareURL:      s.buildShareURLWithSourceURL(created, site.URL),
 			PlainPassword: password,
 		})
+		s.recordSystemLog("core", "info", "share_created", requestIDFromContext(r.Context()), "share created", fmt.Sprintf("site_id=%d", created.SiteID), "share_mode="+created.ShareMode, fmt.Sprintf("frp_port=%d", created.FRPPort))
 	default:
 		respondMethodNotAllowed(w)
 	}
@@ -784,6 +803,7 @@ func (s *Server) handleShareActions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		respondJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+		s.recordSystemLog("core", "info", "share_stopped", requestIDFromContext(r.Context()), "share stopped", fmt.Sprintf("share_id=%d", shareID), fmt.Sprintf("site_id=%d", share.SiteID))
 		return
 	}
 
@@ -1770,11 +1790,13 @@ func (s *Server) handleAPIProxy(w http.ResponseWriter, r *http.Request) {
 	if s.tryHandleSubdomainShareRequest(w, r) {
 		return
 	}
-	w.Header().Set("X-Nonav-Route", "fallback")
-	w.Header().Set("X-Nonav-Reason", "api_proxy_not_matched")
-	s.logRoute(r, "api_proxy_not_matched", map[string]any{"path": r.URL.Path})
-
-	http.NotFound(w, r)
+	if s.apiProxy == nil {
+		respondError(w, http.StatusBadGateway, "nonav unavailable")
+		return
+	}
+	w.Header().Set("X-Nonav-Route", "api_proxy")
+	s.logRoute(r, "api_proxy_forward", map[string]any{"path": r.URL.Path})
+	s.apiProxy.ServeHTTP(w, r)
 }
 
 func (s *Server) tryHandleSubdomainShareRequest(w http.ResponseWriter, r *http.Request) bool {

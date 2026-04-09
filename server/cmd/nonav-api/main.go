@@ -21,11 +21,11 @@ func main() {
 	cfg := config.Load()
 	application, err := app.NewAPI(cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize api app: %v", err)
+		log.Fatalf("failed to initialize nonav: %v", err)
 	}
 
 	if err := application.Run(); err != nil {
-		log.Fatalf("api exited with error: %v", err)
+		log.Fatalf("nonav exited with error: %v", err)
 	}
 }
 

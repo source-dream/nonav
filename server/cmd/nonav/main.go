@@ -23,9 +23,9 @@ func main() {
 	loadEnvFile("gateway.env")
 
 	cfg := config.Load()
-	apiApp, err := app.NewAPI(cfg)
+	nonavApp, err := app.NewAPI(cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize api app: %v", err)
+		log.Fatalf("failed to initialize nonav: %v", err)
 	}
 
 	gatewayApp, err := app.NewGateway(cfg)
@@ -39,7 +39,7 @@ func main() {
 
 	go func() {
 		defer wg.Done()
-		errCh <- apiApp.Run()
+		errCh <- nonavApp.Run()
 	}()
 
 	go func() {

@@ -22,19 +22,30 @@ type FRPProxySpec struct {
 }
 
 type FRPProcessManager struct {
-	cfg   config.Config
-	mu    sync.Mutex
-	procs map[int64]*exec.Cmd
-	specs map[int64]FRPProxySpec
-	fails map[int64]int
+	cfg     config.Config
+	service string
+	logs    *SystemLogBuffer
+	mu      sync.Mutex
+	procs   map[int64]*exec.Cmd
+	specs   map[int64]FRPProxySpec
+	fails   map[int64]int
 }
 
-func NewFRPProcessManager(cfg config.Config) *FRPProcessManager {
+type FRPProcessSnapshot struct {
+	Enabled         bool
+	DesiredCount    int
+	RunningCount    int
+	RestartingCount int
+}
+
+func NewFRPProcessManager(cfg config.Config, logs *SystemLogBuffer, service string) *FRPProcessManager {
 	return &FRPProcessManager{
-		cfg:   cfg,
-		procs: make(map[int64]*exec.Cmd),
-		specs: make(map[int64]FRPProxySpec),
-		fails: make(map[int64]int),
+		cfg:     cfg,
+		service: service,
+		logs:    logs,
+		procs:   make(map[int64]*exec.Cmd),
+		specs:   make(map[int64]FRPProxySpec),
+		fails:   make(map[int64]int),
 	}
 }
 
@@ -77,6 +88,7 @@ func (m *FRPProcessManager) startProxyOnce(spec FRPProxySpec) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start frpc proxy process: %w", err)
 	}
+	m.record("info", "frpc_started", fmt.Sprintf("frpc proxy started (share=%d)", spec.ShareID), fmt.Sprintf("proxy=%s", spec.ProxyName), fmt.Sprintf("remote_port=%d", spec.RemotePort))
 
 	m.mu.Lock()
 	m.procs[spec.ShareID] = cmd
@@ -89,9 +101,13 @@ func (m *FRPProcessManager) startProxyOnce(spec FRPProxySpec) error {
 			msg := strings.TrimSpace(captured.String())
 			if msg != "" {
 				log.Printf("frpc proxy process exited with error (share=%d): %v, output: %s", shareID, err, msg)
+				m.record("error", "frpc_exited", fmt.Sprintf("frpc proxy exited with error (share=%d)", shareID), fmt.Sprintf("error=%v", err), "output="+msg)
 			} else {
 				log.Printf("frpc proxy process exited with error (share=%d): %v", shareID, err)
+				m.record("error", "frpc_exited", fmt.Sprintf("frpc proxy exited with error (share=%d)", shareID), fmt.Sprintf("error=%v", err))
 			}
+		} else {
+			m.record("info", "frpc_exited", fmt.Sprintf("frpc proxy exited (share=%d)", shareID))
 		}
 
 		m.mu.Lock()
@@ -116,6 +132,7 @@ func (m *FRPProcessManager) startProxyOnce(spec FRPProxySpec) error {
 		if shouldRestart {
 			if failCount >= 6 {
 				log.Printf("frpc proxy process disabled after repeated failures (share=%d)", shareID)
+				m.record("error", "frpc_disabled", fmt.Sprintf("frpc proxy disabled after repeated failures (share=%d)", shareID), fmt.Sprintf("fail_count=%d", failCount))
 				m.mu.Lock()
 				delete(m.specs, shareID)
 				delete(m.fails, shareID)
@@ -136,6 +153,7 @@ func (m *FRPProcessManager) startProxyOnce(spec FRPProxySpec) error {
 
 			if restartErr := m.startProxyOnce(spec); restartErr != nil {
 				log.Printf("frpc proxy process restart failed (share=%d): %v", shareID, restartErr)
+				m.record("error", "frpc_restart_failed", fmt.Sprintf("frpc proxy restart failed (share=%d)", shareID), fmt.Sprintf("error=%v", restartErr))
 			}
 		}
 	}(spec.ShareID, cmd, &output)
@@ -161,6 +179,7 @@ func (m *FRPProcessManager) StopProxy(shareID int64) error {
 	if err := cmd.Process.Kill(); err != nil {
 		return fmt.Errorf("stop frpc proxy process: %w", err)
 	}
+	m.record("info", "frpc_stopped", fmt.Sprintf("frpc proxy stopped (share=%d)", shareID))
 
 	return nil
 }
@@ -176,6 +195,37 @@ func (m *FRPProcessManager) StopAll() {
 	for _, id := range ids {
 		_ = m.StopProxy(id)
 	}
+}
+
+func (m *FRPProcessManager) Snapshot() FRPProcessSnapshot {
+	if m == nil {
+		return FRPProcessSnapshot{}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	restarting := 0
+	for shareID := range m.specs {
+		if _, running := m.procs[shareID]; running {
+			continue
+		}
+		restarting++
+	}
+
+	return FRPProcessSnapshot{
+		Enabled:         m.cfg.ForceFRP,
+		DesiredCount:    len(m.specs),
+		RunningCount:    len(m.procs),
+		RestartingCount: restarting,
+	}
+}
+
+func (m *FRPProcessManager) record(level string, event string, message string, details ...string) {
+	if m == nil || m.logs == nil {
+		return
+	}
+	m.logs.Add(m.service, "frpc", level, event, "-", message, details...)
 }
 
 func restartBackoff(failCount int) time.Duration {

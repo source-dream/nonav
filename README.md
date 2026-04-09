@@ -13,7 +13,7 @@ Go + Vue + SQLite 的内网导航与分享网关项目。
 ## 架构
 
 - `web`：Vue 3 前端（导航页）
-- `server/cmd/nonav-api`：Go 导航服务（内网导航前后端 + 控制面 API）（二进制 1）
+- `server/cmd/nonav-api`：Go 导航服务 `nonav`（内网导航前后端 + 控制面）（二进制 1）
 - `server/cmd/nonav-gateway`：Go 分享网关（仅提供 `/s/*` 分享访问）（二进制 2）
 - `nginx`（可选）：外层 TLS 与反向代理
 
@@ -21,7 +21,7 @@ Go + Vue + SQLite 的内网导航与分享网关项目。
 
 1. 用户访问 `node.sourcedream.cn/s/<token>`
 2. Nginx 反代到 Go 网关（`nonav-gateway`）
-3. 网关将 `/api/*` 转发到 `nonav-api`
+3. 网关将 `/api/*` 转发到 `nonav`
 4. 网关对 `/s/*` 校验分享状态和密码会话并反代到目标站点
 
 > 当前版本已支持 FRP-only 模式，可在分享创建时动态分配 FRP 上游端口。
@@ -34,17 +34,17 @@ Go + Vue + SQLite 的内网导航与分享网关项目。
 make deps
 ```
 
-### 2) 开发模式（API + 网关 + 前端 同时启动）
+### 2) 开发模式（`nonav` + `nonav-gateway` + 前端同时启动）
 
 ```bash
 make dev
 ```
 
 - 前端 Vite: `http://localhost:5173`
-- API: `http://localhost:8081`
-- Gateway: `http://localhost:8080`
+- nonav: `http://localhost:8081`
+- nonav-gateway: `http://localhost:8080`
 
-`make dev` 由 gateway 内嵌启动 `frps`，分享创建时由 API 动态拉起 `frpc tcp` 代理进程。
+`make dev` 由 `nonav-gateway` 内嵌启动 `frps`，分享创建时由 `nonav` 动态拉起 `frpc tcp` 代理进程。
 
 开发模式默认开启 `FRP-only` 验证：新建分享会在 `NONAV_FRP_PORT_MIN` 到 `NONAV_FRP_PORT_MAX` 的端口池中动态分配上游目标。
 
@@ -67,18 +67,18 @@ make run-all
 
 - 构建前端到 `web/dist`
 - 拷贝静态文件到 `server/internal/httpserver/web-dist` 并编译进 `nonav-gateway`
-- 构建 API 二进制到 `bin/nonav`
+- 构建 nonav 二进制到 `bin/nonav`
 - 构建 Gateway 二进制到 `bin/nonav-gateway`
 
 此时运行两个二进制即可同时提供：
 
 - 网关仅处理 `/s/*` 与分享上下文请求，访问 `/` 返回 404
-- API `/api/*`（gateway 反代到 api）
+- nonav `/api/*`（gateway 反代到 nonav）
 - 分享网关 `/s/*`（gateway 直接处理）
 
 ## 手动启动（不使用 Make）
 
-### 1) 启动 API
+### 1) 启动 nonav
 
 ```bash
 cd server
@@ -126,7 +126,7 @@ go run ./cmd/nonav-gateway
 - `NONAV_FRP_SERVER_ADDR`：frps 地址（默认 `127.0.0.1`）
 - `NONAV_FRP_SERVER_PORT`：frps 端口（默认 `7000`）
 - `NONAV_FRP_AUTH_TOKEN`：frp token（默认 `nonav-local-dev`）
-- `NONAV_FRP_RECOVER_ON_START`：API 启动时是否自动恢复历史分享代理（默认 `true`）
+- `NONAV_FRP_RECOVER_ON_START`：nonav 启动时是否自动恢复历史分享代理（默认 `true`）
 
 分享模式说明：
 
@@ -154,7 +154,7 @@ npm run dev
 
 推荐拓扑：
 
-- 内网服务器：`nonav`（API） + 业务站点
+- 内网服务器：`nonav` + 业务站点
 - 公网服务器：`nonav-gateway`（嵌入 frps）
 - 网关前面可选 Nginx 做 TLS
 
@@ -180,7 +180,7 @@ make build
 
 ### 3) systemd 启动
 
-- 内网机：`deploy/systemd/nonav-api.service`
+- 内网机：`deploy/systemd/nonav-api.service`（对应 `nonav`）
 - 公网机：`deploy/systemd/nonav-gateway.service`
 
 ```bash
@@ -196,7 +196,7 @@ sudo systemctl enable --now nonav-gateway
 - 公网机 `7000/tcp`（frps）需要放行
 - 公网机 `8080` 仅给 Nginx 回源（推荐）
 - 内网机到公网机 `7000` 必须可达
-- 公网机 gateway 到 `127.0.0.1:18081`（API frp隧道）应可达
+- 公网机 gateway 到 `127.0.0.1:18081`（nonav frp 隧道）应可达
 - `NONAV_FRP_AUTH_TOKEN` 内外网保持一致
 
 ### 5) 验证
